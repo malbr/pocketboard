@@ -1,4 +1,4 @@
-import type { Card } from "@pocketboard/shared";
+import { cardListSchema, cardSchema, type Card } from "@pocketboard/shared";
 
 const baseUrl = import.meta.env.VITE_API_URL ?? "/api";
 
@@ -7,7 +7,12 @@ export async function fetchCards(): Promise<Card[]> {
   if (!response.ok) {
     throw new Error("Failed to load cards");
   }
-  return response.json();
+  const body = await response.json();
+  const result = cardListSchema.safeParse(body);
+  if (!result.success) {
+    throw new Error("Failed to load cards");
+  }
+  return result.data;
 }
 
 export async function createCard(title: string): Promise<Card> {
@@ -22,5 +27,10 @@ export async function createCard(title: string): Promise<Card> {
     throw new Error(typeof body.error === "string" ? body.error : "Failed to create card");
   }
 
-  return response.json();
+  const body = await response.json();
+  const result = cardSchema.safeParse(body);
+  if (!result.success) {
+    throw new Error("Failed to create card");
+  }
+  return result.data;
 }

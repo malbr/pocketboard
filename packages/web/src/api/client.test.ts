@@ -34,4 +34,20 @@ describe("api client", () => {
       expect.objectContaining({ method: "POST" }),
     );
   });
+
+  it("rejects a malformed card list on a successful response", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify([{ id: "not-a-uuid" }]), { status: 200 }),
+    );
+
+    await expect(fetchCards()).rejects.toThrow("Failed to load cards");
+  });
+
+  it("rejects a malformed card on a successful create response", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ title: "missing fields" }), { status: 201 }),
+    );
+
+    await expect(createCard("New task")).rejects.toThrow("Failed to create card");
+  });
 });

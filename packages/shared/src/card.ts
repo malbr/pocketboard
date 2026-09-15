@@ -28,3 +28,5 @@ export const cardSchema = z
   .strict();
 
 export type Card = z.infer<typeof cardSchema>;
+
+export const cardListSchema = z.array(cardSchema);

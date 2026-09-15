@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CardStatus, createCardInputSchema, cardSchema } from "./card";
+import { CardStatus, createCardInputSchema, cardSchema, cardListSchema } from "./card";
 
 describe("createCardInputSchema", () => {
   it("accepts a valid title", () => {
@@ -56,6 +56,42 @@ describe("cardSchema", () => {
       status: CardStatus.Backlog,
       createdAt: new Date().toISOString(),
     });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("cardListSchema", () => {
+  it("accepts an empty list", () => {
+    const result = cardListSchema.safeParse([]);
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts a list of well-formed cards", () => {
+    const result = cardListSchema.safeParse([
+      {
+        id: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        title: "Write ADR",
+        status: CardStatus.Backlog,
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a list containing a malformed card", () => {
+    const result = cardListSchema.safeParse([
+      {
+        id: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        title: "Write ADR",
+        status: "not-a-status",
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a non-array payload", () => {
+    const result = cardListSchema.safeParse({ id: "not-a-list" });
     expect(result.success).toBe(false);
   });
 });
