@@ -1,5 +1,5 @@
-import { Board } from "./components/Board";
+import { AuthGate } from "./components/AuthGate";
 
 export function App() {
-  return <Board />;
+  return <AuthGate />;
 }

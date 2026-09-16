@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, preHandlerAsyncHookHandler } from "fastify";
 import { desc } from "drizzle-orm";
 import type { ZodIssue } from "zod";
 import { createCardInputSchema } from "@pocketboard/shared";
@@ -7,8 +7,15 @@ import { cards } from "../db/schema";
 
 type CardRow = typeof cards.$inferSelect;
 
-export function registerCardRoutes(app: FastifyInstance, db: Database): void {
-  app.post("/cards", async (request, reply) => {
+export function registerCardRoutes(
+  app: FastifyInstance,
+  db: Database,
+  requireOwner: preHandlerAsyncHookHandler,
+): void {
+  // Every card route is owner-only. Mutations additionally carry CSRF
+  // protection; the guard runs first so an unauthenticated caller always sees
+  // 401 rather than a CSRF failure.
+  app.post("/cards", { preHandler: [requireOwner, app.csrfProtection] }, async (request, reply) => {
     const parsed = createCardInputSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({
@@ -24,7 +31,7 @@ export function registerCardRoutes(app: FastifyInstance, db: Database): void {
     return reply.status(201).send(serializeCard(created));
   });
 
-  app.get("/cards", async (_request, reply) => {
+  app.get("/cards", { preHandler: requireOwner }, async (_request, reply) => {
     const rows = await db.select().from(cards).orderBy(desc(cards.createdAt));
     return reply.status(200).send(rows.map(serializeCard));
   });

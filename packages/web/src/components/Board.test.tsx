@@ -15,6 +15,8 @@ function makeCard(overrides: Partial<Card> = {}): Card {
 }
 
 describe("Board", () => {
+  const csrfToken = "test-csrf-token";
+
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn());
   });
@@ -26,7 +28,7 @@ describe("Board", () => {
   it("renders the Backlog, Doing, and Done columns", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }));
 
-    render(<Board />);
+    render(<Board csrfToken={csrfToken} />);
 
     expect(await screen.findByRole("heading", { name: "Backlog" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Doing" })).toBeInTheDocument();
@@ -37,7 +39,7 @@ describe("Board", () => {
     const existing = makeCard({ title: "From the API", status: "doing" });
     vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify([existing]), { status: 200 }));
 
-    render(<Board />);
+    render(<Board csrfToken={csrfToken} />);
 
     const doingColumn = await screen.findByTestId("column-doing");
     expect(within(doingColumn).getByText("From the API")).toBeInTheDocument();
@@ -47,7 +49,7 @@ describe("Board", () => {
     const user = userEvent.setup();
     vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }));
 
-    render(<Board />);
+    render(<Board csrfToken={csrfToken} />);
     await screen.findByRole("heading", { name: "Backlog" });
 
     const created = makeCard({ title: "New task" });
@@ -61,14 +63,28 @@ describe("Board", () => {
 
     expect(fetch).toHaveBeenLastCalledWith(
       "/api/cards",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ "X-CSRF-Token": csrfToken }),
+      }),
     );
+  });
+
+  it("asks the gate to re-check the session when the API returns 401", async () => {
+    const onAuthLost = vi.fn();
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "authentication_required" }), { status: 401 }),
+    );
+
+    render(<Board csrfToken={csrfToken} onAuthLost={onAuthLost} />);
+
+    await waitFor(() => expect(onAuthLost).toHaveBeenCalled());
   });
 
   it("disables the submit button while the title is blank", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }));
 
-    render(<Board />);
+    render(<Board csrfToken={csrfToken} />);
     await screen.findByRole("heading", { name: "Backlog" });
 
     expect(screen.getByRole("button", { name: "Add card" })).toBeDisabled();
@@ -78,7 +94,7 @@ describe("Board", () => {
     const user = userEvent.setup();
     vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }));
 
-    render(<Board />);
+    render(<Board csrfToken={csrfToken} />);
     await screen.findByRole("heading", { name: "Backlog" });
 
     vi.mocked(fetch).mockResolvedValueOnce(

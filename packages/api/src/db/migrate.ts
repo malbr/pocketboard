@@ -4,7 +4,7 @@ import path from "node:path";
 import { createDbClient } from "./client";
 
 const connectionString =
-  process.env.DATABASE_URL ?? "postgres://pocketboard:pocketboard@localhost:5432/pocketboard";
+  process.env.DATABASE_URL ?? "postgres://pocketboard:pocketboard@127.0.0.1:5432/pocketboard";
 
 const migrationsFolder = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "migrations");
 

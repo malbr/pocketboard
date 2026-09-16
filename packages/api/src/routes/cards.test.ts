@@ -1,39 +1,65 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { migrate } from "drizzle-orm/postgres-js/migrator";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import postgres from "postgres";
-import { buildApp } from "../app";
-import { createDbClient, type Database } from "../db/client";
+import type { FastifyInstance, LightMyRequestResponse } from "fastify";
+import type { Database } from "../db/client";
 import { cards } from "../db/schema";
+import { buildTestApp } from "../testing/build-test-app";
+import { createTestDatabase, databaseAvailable } from "../testing/test-database";
 
-const connectionString =
-  process.env.DATABASE_URL ?? "postgres://pocketboard:pocketboard@localhost:5432/pocketboard";
+const SESSION_COOKIE = "pocketboard.sid";
 
-const migrationsFolder = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "migrations");
+/**
+ * Card routes are owner-only, so every case here signs in first. The
+ * unauthenticated and wrong-user paths are covered in `auth.test.ts`.
+ */
+async function signedInApp(db: Database) {
+  const app = await buildTestApp({ db });
+  const login = await app.inject({
+    method: "GET",
+    url: "/auth/github/callback?code=test-code&state=test-state",
+  });
+  const cookie = login.cookies.find((candidate) => candidate.name === SESSION_COOKIE)?.value;
+  if (!cookie) {
+    throw new Error("sign-in did not establish a session cookie");
+  }
 
-let databaseAvailable = true;
-try {
-  const probe = postgres(connectionString, { connect_timeout: 2, max: 1 });
-  await probe`select 1`;
-  await probe.end();
-} catch {
-  databaseAvailable = false;
+  const session = await app.inject({
+    method: "GET",
+    url: "/auth/session",
+    headers: { cookie: `${SESSION_COOKIE}=${cookie}` },
+  });
+
+  return { app, cookie, csrfToken: session.json().csrfToken as string };
+}
+
+function postCard(
+  app: FastifyInstance,
+  auth: { cookie: string; csrfToken: string },
+  payload: Record<string, unknown>,
+): Promise<LightMyRequestResponse> {
+  return app.inject({
+    method: "POST",
+    url: "/cards",
+    headers: {
+      cookie: `${SESSION_COOKIE}=${auth.cookie}`,
+      "x-csrf-token": auth.csrfToken,
+    },
+    payload,
+  });
 }
 
 describe.skipIf(!databaseAvailable)("card routes (real PostgreSQL)", () => {
   let db: Database;
-  let queryClient: ReturnType<typeof createDbClient>["queryClient"];
+  let queryClient: Awaited<ReturnType<typeof createTestDatabase>>["queryClient"];
 
   beforeAll(async () => {
-    const client = createDbClient(connectionString);
+    const client = await createTestDatabase();
     db = client.db;
     queryClient = client.queryClient;
-    await migrate(db, { migrationsFolder });
   });
 
   beforeEach(async () => {
     await queryClient`truncate table cards`;
+    await queryClient`truncate table sessions`;
   });
 
   afterAll(async () => {
@@ -41,13 +67,9 @@ describe.skipIf(!databaseAvailable)("card routes (real PostgreSQL)", () => {
   });
 
   it("creates a Backlog card and returns it", async () => {
-    const app = buildApp(db);
+    const { app, ...auth } = await signedInApp(db);
 
-    const response = await app.inject({
-      method: "POST",
-      url: "/cards",
-      payload: { title: "Write ADR" },
-    });
+    const response = await postCard(app, auth, { title: "Write ADR" });
 
     expect(response.statusCode).toBe(201);
     const body = response.json();
@@ -57,38 +79,34 @@ describe.skipIf(!databaseAvailable)("card routes (real PostgreSQL)", () => {
   });
 
   it("rejects an empty title with a deterministic 400 error", async () => {
-    const app = buildApp(db);
+    const { app, ...auth } = await signedInApp(db);
 
-    const response = await app.inject({
-      method: "POST",
-      url: "/cards",
-      payload: { title: "" },
-    });
+    const response = await postCard(app, auth, { title: "" });
 
     expect(response.statusCode).toBe(400);
     expect(response.json()).toMatchObject({ error: "invalid_card_input" });
   });
 
   it("rejects a missing title with a deterministic 400 error", async () => {
-    const app = buildApp(db);
+    const { app, ...auth } = await signedInApp(db);
 
-    const response = await app.inject({
-      method: "POST",
-      url: "/cards",
-      payload: {},
-    });
+    const response = await postCard(app, auth, {});
 
     expect(response.statusCode).toBe(400);
     expect(response.json()).toMatchObject({ error: "invalid_card_input" });
   });
 
   it("lists created cards newest first", async () => {
-    const app = buildApp(db);
+    const { app, ...auth } = await signedInApp(db);
 
-    await app.inject({ method: "POST", url: "/cards", payload: { title: "First card" } });
-    await app.inject({ method: "POST", url: "/cards", payload: { title: "Second card" } });
+    await postCard(app, auth, { title: "First card" });
+    await postCard(app, auth, { title: "Second card" });
 
-    const response = await app.inject({ method: "GET", url: "/cards" });
+    const response = await app.inject({
+      method: "GET",
+      url: "/cards",
+      headers: { cookie: `${SESSION_COOKIE}=${auth.cookie}` },
+    });
 
     expect(response.statusCode).toBe(200);
     const body = response.json();
@@ -98,18 +116,22 @@ describe.skipIf(!databaseAvailable)("card routes (real PostgreSQL)", () => {
   });
 
   it("lists an empty array when no cards exist", async () => {
-    const app = buildApp(db);
+    const { app, ...auth } = await signedInApp(db);
 
-    const response = await app.inject({ method: "GET", url: "/cards" });
+    const response = await app.inject({
+      method: "GET",
+      url: "/cards",
+      headers: { cookie: `${SESSION_COOKIE}=${auth.cookie}` },
+    });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual([]);
   });
 
   it("persists cards durably in the cards table", async () => {
-    const app = buildApp(db);
+    const { app, ...auth } = await signedInApp(db);
 
-    await app.inject({ method: "POST", url: "/cards", payload: { title: "Durable card" } });
+    await postCard(app, auth, { title: "Durable card" });
 
     const rows = await db.select().from(cards);
     expect(rows).toHaveLength(1);
