@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pocketboard
+      POSTGRES_PASSWORD: pocketboard
+      POSTGRES_DB: pocketboard
+    ports:
+      - "5432:5432"
+    volumes:
+      - pocketboard-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pocketboard"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+volumes:
+  pocketboard-postgres:
