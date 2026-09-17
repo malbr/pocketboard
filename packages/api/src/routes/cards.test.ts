@@ -65,6 +65,34 @@ function moveCard(
   });
 }
 
+function deleteCard(
+  app: FastifyInstance,
+  auth: { cookie: string; csrfToken: string },
+  cardId: string,
+  payload: Record<string, unknown>,
+): Promise<LightMyRequestResponse> {
+  return app.inject({
+    method: "DELETE",
+    url: `/cards/${cardId}`,
+    headers: {
+      cookie: `${SESSION_COOKIE}=${auth.cookie}`,
+      "x-csrf-token": auth.csrfToken,
+    },
+    payload,
+  });
+}
+
+function listCards(
+  app: FastifyInstance,
+  auth: { cookie: string },
+): Promise<LightMyRequestResponse> {
+  return app.inject({
+    method: "GET",
+    url: "/cards",
+    headers: { cookie: `${SESSION_COOKIE}=${auth.cookie}` },
+  });
+}
+
 describe.skipIf(!databaseAvailable)("card routes (real PostgreSQL)", () => {
   let db: Database;
   let queryClient: Awaited<ReturnType<typeof createTestDatabase>>["queryClient"];
@@ -271,6 +299,150 @@ describe.skipIf(!databaseAvailable)("card routes (real PostgreSQL)", () => {
 
     const rows = await db.select().from(cards);
     expect(rows[0].status).toBe("backlog");
+  });
+
+  it("deletes a card, returns the card it removed, and stops listing it", async () => {
+    const { app, ...auth } = await signedInApp(db);
+    const created = (await postCard(app, auth, { title: "Delete me" })).json();
+
+    const response = await deleteCard(app, auth, created.id, { version: created.version });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(created);
+    expect((await listCards(app, auth)).json()).toEqual([]);
+  });
+
+  it("returns the card as it stood at the version that was deleted", async () => {
+    const { app, ...auth } = await signedInApp(db);
+    const created = (await postCard(app, auth, { title: "Delete me" })).json();
+    const moved = (
+      await moveCard(app, auth, created.id, { status: "doing", version: created.version })
+    ).json();
+
+    const response = await deleteCard(app, auth, created.id, { version: moved.version });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(moved);
+  });
+
+  it("removes only the named card from the cards table", async () => {
+    const { app, ...auth } = await signedInApp(db);
+    const doomed = (await postCard(app, auth, { title: "Delete me" })).json();
+    await postCard(app, auth, { title: "Keep me" });
+
+    await deleteCard(app, auth, doomed.id, { version: doomed.version });
+
+    const rows = await db.select().from(cards);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].title).toBe("Keep me");
+  });
+
+  it("refuses a stale delete, keeps the card, and reports it as it now stands", async () => {
+    const { app, ...auth } = await signedInApp(db);
+    const created = (await postCard(app, auth, { title: "Contested" })).json();
+
+    const moved = await moveCard(app, auth, created.id, {
+      status: "doing",
+      version: created.version,
+    });
+    expect(moved.statusCode).toBe(200);
+
+    // A second browser still holding the version it loaded before the move.
+    const staleDelete = await deleteCard(app, auth, created.id, { version: created.version });
+
+    expect(staleDelete.statusCode).toBe(409);
+    expect(staleDelete.json()).toEqual({
+      error: "card_version_conflict",
+      card: moved.json(),
+    });
+
+    const rows = await db.select().from(cards);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("doing");
+  });
+
+  it("reports a delete of a card that does not exist as not found", async () => {
+    const { app, ...auth } = await signedInApp(db);
+
+    const response = await deleteCard(app, auth, randomUUID(), { version: 1 });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: "card_not_found" });
+  });
+
+  it("reports a repeated delete of the same card as not found", async () => {
+    const { app, ...auth } = await signedInApp(db);
+    const created = (await postCard(app, auth, { title: "Delete me" })).json();
+
+    expect((await deleteCard(app, auth, created.id, { version: created.version })).statusCode).toBe(
+      200,
+    );
+    const repeat = await deleteCard(app, auth, created.id, { version: created.version });
+
+    expect(repeat.statusCode).toBe(404);
+    expect(repeat.json()).toEqual({ error: "card_not_found" });
+  });
+
+  it("rejects a delete of a malformed card identifier before touching the database", async () => {
+    const { app, ...auth } = await signedInApp(db);
+
+    const response = await deleteCard(app, auth, "not-a-uuid", { version: 1 });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: "invalid_card_input" });
+  });
+
+  it.each([
+    ["a missing token", {}],
+    ["a non-numeric token", { version: "1" }],
+    ["a zero token", { version: 0 }],
+    ["a smuggled status", { version: 1, status: "done" }],
+  ])("rejects a delete carrying %s and keeps the card", async (_name, payload) => {
+    const { app, ...auth } = await signedInApp(db);
+    const created = (await postCard(app, auth, { title: "Stay put" })).json();
+
+    const response = await deleteCard(app, auth, created.id, payload);
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: "invalid_card_input" });
+
+    const rows = await db.select().from(cards);
+    expect(rows).toHaveLength(1);
+  });
+
+  it("refuses a delete from a caller with no session", async () => {
+    const { app, ...auth } = await signedInApp(db);
+    const created = (await postCard(app, auth, { title: "Stay put" })).json();
+
+    const response = await app.inject({
+      method: "DELETE",
+      url: `/cards/${created.id}`,
+      payload: { version: created.version },
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toEqual({ error: "authentication_required" });
+
+    const rows = await db.select().from(cards);
+    expect(rows).toHaveLength(1);
+  });
+
+  it("refuses a delete that carries no CSRF token", async () => {
+    const { app, ...auth } = await signedInApp(db);
+    const created = (await postCard(app, auth, { title: "Stay put" })).json();
+
+    const response = await app.inject({
+      method: "DELETE",
+      url: `/cards/${created.id}`,
+      headers: { cookie: `${SESSION_COOKIE}=${auth.cookie}` },
+      payload: { version: created.version },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: "csrf_token_invalid" });
+
+    const rows = await db.select().from(cards);
+    expect(rows).toHaveLength(1);
   });
 
   it("persists cards durably in the cards table", async () => {

@@ -5,6 +5,7 @@ import {
   CardErrorCode,
   cardIdParamsSchema,
   createCardInputSchema,
+  deleteCardInputSchema,
   moveCardInputSchema,
 } from "@pocketboard/shared";
 import type { Database } from "../db/client";
@@ -61,6 +62,42 @@ export function registerCardRoutes(
 
       // Nothing was updated: either the card is gone or the caller's token is
       // stale. Only now is it worth asking which.
+      const [current] = await db.select().from(cards).where(eq(cards.id, params.data.cardId));
+      if (!current) {
+        return reply.status(404).send({ error: CardErrorCode.CardNotFound });
+      }
+
+      return reply
+        .status(409)
+        .send({ error: CardErrorCode.CardVersionConflict, card: serializeCard(current) });
+    },
+  );
+
+  app.delete(
+    "/cards/:cardId",
+    { preHandler: [requireOwner, app.csrfProtection] },
+    async (request, reply) => {
+      const params = cardIdParamsSchema.safeParse(request.params);
+      const body = deleteCardInputSchema.safeParse(request.body);
+      if (!params.success || !body.success) {
+        return reply.status(400).send(invalidCardInput(params, body));
+      }
+
+      // Same shape as the move: the version is part of the write, so a card
+      // that changed since the caller read it cannot be removed by a request
+      // that never saw the change.
+      const [deleted] = await db
+        .delete(cards)
+        .where(and(eq(cards.id, params.data.cardId), eq(cards.version, body.data.version)))
+        .returning();
+
+      // The deleted card comes back as it stood when it was removed: ADR 0002
+      // has every card mutation answer with the version it acted on, and it is
+      // the only record of the card left once the row is gone.
+      if (deleted) {
+        return reply.status(200).send(serializeCard(deleted));
+      }
+
       const [current] = await db.select().from(cards).where(eq(cards.id, params.data.cardId));
       if (!current) {
         return reply.status(404).send({ error: CardErrorCode.CardNotFound });

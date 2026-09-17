@@ -34,10 +34,21 @@ test("moving a card requires a session", async ({ page }) => {
   expect(await response.json()).toEqual({ error: "authentication_required" });
 });
 
-test("a signed-out visitor is never shown the card form", async ({ page }) => {
+test("deleting a card requires a session", async ({ page }) => {
+  const response = await page.request.delete("/api/cards/3fa85f64-5717-4562-b3fc-2c963f66afa6", {
+    data: { version: 1 },
+    failOnStatusCode: false,
+  });
+
+  expect(response.status()).toBe(401);
+  expect(await response.json()).toEqual({ error: "authentication_required" });
+});
+
+test("a signed-out visitor is never shown the card form or a delete control", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByRole("link", { name: "Sign in with GitHub" })).toBeVisible();
   await expect(page.getByLabel("New card title")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Add card" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Delete/ })).toHaveCount(0);
 });

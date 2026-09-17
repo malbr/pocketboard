@@ -1,5 +1,6 @@
 import {
   cardListSchema,
+  cardNotFoundSchema,
   cardSchema,
   cardVersionConflictSchema,
   sessionSchema,
@@ -19,14 +20,27 @@ export class AuthRequiredError extends Error {
 }
 
 /**
- * Thrown when the API refused a move because the browser was working from a
- * card it had already outgrown. It carries the card as the API now holds it, so
- * the UI can say what changed rather than only that something did.
+ * Thrown when the API refused a move or a delete because the browser was
+ * working from a card it had already outgrown. It carries the card as the API
+ * now holds it, so the UI can say what changed rather than only that something
+ * did.
  */
 export class CardVersionConflictError extends Error {
   constructor(readonly card: Card) {
     super("card_version_conflict");
     this.name = "CardVersionConflictError";
+  }
+}
+
+/**
+ * Thrown when the API has no such card any more. A delete says so explicitly so
+ * the UI can tell "someone already removed this" apart from a request that
+ * simply failed.
+ */
+export class CardNotFoundError extends Error {
+  constructor() {
+    super("card_not_found");
+    this.name = "CardNotFoundError";
   }
 }
 
@@ -119,6 +133,57 @@ export async function moveCard(
     throw new Error("Failed to move card");
   }
   return result.data;
+}
+
+export async function deleteCard(
+  cardId: string,
+  version: number,
+  csrfToken: string,
+): Promise<Card> {
+  const response = await fetch(`${baseUrl}/cards/${cardId}`, {
+    method: "DELETE",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+    body: JSON.stringify({ version }),
+  });
+
+  if (response.status === 401) {
+    throw new AuthRequiredError();
+  }
+
+  if (response.status === 404) {
+    // A 404 can come from something other than this API — a proxy, a
+    // misrouted path — and telling the owner their card was already deleted on
+    // that basis would be a guess. Only this API's own body earns that claim.
+    const notFound = cardNotFoundSchema.safeParse(await readJson(response));
+    if (!notFound.success) {
+      throw new Error("Failed to delete card");
+    }
+    throw new CardNotFoundError();
+  }
+
+  if (response.status === 409) {
+    const conflict = cardVersionConflictSchema.safeParse(await response.json());
+    if (!conflict.success) {
+      throw new Error("Failed to delete card");
+    }
+    throw new CardVersionConflictError(conflict.data.card);
+  }
+
+  if (!response.ok) {
+    throw new Error("Failed to delete card");
+  }
+
+  const result = cardSchema.safeParse(await readJson(response));
+  if (!result.success) {
+    throw new Error("Failed to delete card");
+  }
+  return result.data;
+}
+
+/** A body that is not JSON is just another malformed answer, not a crash. */
+async function readJson(response: Response): Promise<unknown> {
+  return response.json().catch(() => null);
 }
 
 export async function createCard(title: string, csrfToken: string): Promise<Card> {

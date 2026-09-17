@@ -43,6 +43,16 @@ export const moveCardInputSchema = z
 
 export type MoveCardInput = z.infer<typeof moveCardInputSchema>;
 
+/**
+ * A delete says nothing about where the card should end up, only which version
+ * of it the caller was looking at when it decided to remove it. Requiring the
+ * token here is what keeps a delete from silently discarding a change the
+ * caller never saw.
+ */
+export const deleteCardInputSchema = z.object({ version: cardVersionSchema }).strict();
+
+export type DeleteCardInput = z.infer<typeof deleteCardInputSchema>;
+
 export const cardSchema = z
   .object({
     id: z.string().uuid(),
@@ -82,3 +92,15 @@ export const cardVersionConflictSchema = z
   .strict();
 
 export type CardVersionConflict = z.infer<typeof cardVersionConflictSchema>;
+
+/**
+ * The answer when the API has no such card. A caller must be able to tell this
+ * apart from any other 404 it might meet — a proxy's, a typo'd path — before it
+ * tells the owner the card was already deleted, so the shape is stated here and
+ * checked rather than inferred from the status code.
+ */
+export const cardNotFoundSchema = z
+  .object({ error: z.literal(CardErrorCode.CardNotFound) })
+  .strict();
+
+export type CardNotFound = z.infer<typeof cardNotFoundSchema>;

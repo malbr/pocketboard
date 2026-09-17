@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuthRequiredError, createCard, fetchCards, fetchSession, logout, moveCard } from "./client";
+import {
+  AuthRequiredError,
+  CardNotFoundError,
+  createCard,
+  deleteCard,
+  fetchCards,
+  fetchSession,
+  logout,
+  moveCard,
+} from "./client";
 
 const csrfToken = "test-csrf-token";
 
@@ -85,6 +94,92 @@ describe("api client", () => {
     });
   });
 
+  it("deletes a card with its concurrency token and returns the card it removed", async () => {
+    const deleted = {
+      id: crypto.randomUUID(),
+      title: "Delete me",
+      status: "backlog",
+      createdAt: new Date().toISOString(),
+      version: 2,
+    };
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify(deleted), { status: 200 }));
+
+    await expect(deleteCard(deleted.id, 2, csrfToken)).resolves.toEqual(deleted);
+
+    expect(fetch).toHaveBeenCalledWith(
+      `/api/cards/${deleted.id}`,
+      expect.objectContaining({
+        method: "DELETE",
+        credentials: "same-origin",
+        headers: expect.objectContaining({ "X-CSRF-Token": csrfToken }),
+        body: JSON.stringify({ version: 2 }),
+      }),
+    );
+  });
+
+  it("surfaces a stale delete as a conflict carrying the card as it now stands", async () => {
+    const current = {
+      id: crypto.randomUUID(),
+      title: "Contested",
+      status: "doing",
+      createdAt: new Date().toISOString(),
+      version: 2,
+    };
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "card_version_conflict", card: current }), {
+        status: 409,
+      }),
+    );
+
+    await expect(deleteCard(current.id, 1, csrfToken)).rejects.toMatchObject({
+      name: "CardVersionConflictError",
+      card: current,
+    });
+  });
+
+  it("surfaces a delete of a card the API no longer has as CardNotFoundError", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "card_not_found" }), { status: 404 }),
+    );
+
+    await expect(deleteCard(crypto.randomUUID(), 1, csrfToken)).rejects.toBeInstanceOf(
+      CardNotFoundError,
+    );
+  });
+
+  it.each([
+    ["an unrelated error code", JSON.stringify({ error: "not_found" })],
+    ["a card-not-found body carrying extra fields", JSON.stringify({ error: "card_not_found", card: null })],
+    ["a body that is not JSON at all", "<html>404 Not Found</html>"],
+  ])("does not claim a card was already deleted from a 404 carrying %s", async (_name, body) => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(body, { status: 404 }));
+
+    const attempt = deleteCard(crypto.randomUUID(), 1, csrfToken);
+
+    await expect(attempt).rejects.toThrow("Failed to delete card");
+    await expect(attempt).rejects.not.toBeInstanceOf(CardNotFoundError);
+  });
+
+  it("rejects a malformed card on a successful delete response", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ title: "missing fields" }), { status: 200 }),
+    );
+
+    await expect(deleteCard(crypto.randomUUID(), 1, csrfToken)).rejects.toThrow(
+      "Failed to delete card",
+    );
+  });
+
+  it("rejects any other refused delete", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "internal_error" }), { status: 500 }),
+    );
+
+    await expect(deleteCard(crypto.randomUUID(), 1, csrfToken)).rejects.toThrow(
+      "Failed to delete card",
+    );
+  });
+
   it("rejects a malformed card list on a successful response", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       new Response(JSON.stringify([{ id: "not-a-uuid" }]), { status: 200 }),
@@ -105,6 +200,7 @@ describe("api client", () => {
     ["fetchCards", () => fetchCards()],
     ["createCard", () => createCard("New task", csrfToken)],
     ["moveCard", () => moveCard(crypto.randomUUID(), "doing", 1, csrfToken)],
+    ["deleteCard", () => deleteCard(crypto.randomUUID(), 1, csrfToken)],
   ])("surfaces a 401 from %s as AuthRequiredError", async (_name, call) => {
     vi.mocked(fetch).mockResolvedValueOnce(
       new Response(JSON.stringify({ error: "authentication_required" }), { status: 401 }),
