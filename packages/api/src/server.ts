@@ -1,19 +1,16 @@
-import { buildApp } from "./app";
-import { createDbClient } from "./db/client";
+import { loadRepositoryEnvFile } from "./config/repository-root";
+import { createProductionApp } from "./composition-root";
 
-const connectionString =
-  process.env.DATABASE_URL ?? "postgres://pocketboard:pocketboard@localhost:5432/pocketboard";
+// npm starts this from `packages/api`, so the root `.env` has to be loaded by
+// path rather than left to the shell. Real environment variables still win.
+loadRepositoryEnvFile();
+
 const port = Number(process.env.API_PORT ?? 3000);
 
-const { db } = createDbClient(connectionString);
-const app = buildApp(db);
+// A configuration failure must crash the process, not start an unprotected API.
+const { app } = await createProductionApp(process.env);
 
-app
-  .listen({ port, host: "0.0.0.0" })
-  .then(() => {
-    console.log(`API listening on port ${port}`);
-  })
-  .catch((error: unknown) => {
-    console.error(error);
-    process.exit(1);
-  });
+app.listen({ port, host: "0.0.0.0" }).catch((error: unknown) => {
+  app.log.fatal({ err: error }, "API failed to start");
+  process.exit(1);
+});

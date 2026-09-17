@@ -1,9 +1,65 @@
-import { cardListSchema, cardSchema, type Card } from "@pocketboard/shared";
+import {
+  cardListSchema,
+  cardSchema,
+  sessionSchema,
+  type Card,
+  type Session,
+} from "@pocketboard/shared";
 
 const baseUrl = import.meta.env.VITE_API_URL ?? "/api";
 
+/** Thrown when the API says the session is gone, so the UI can re-prompt. */
+export class AuthRequiredError extends Error {
+  constructor() {
+    super("authentication_required");
+    this.name = "AuthRequiredError";
+  }
+}
+
+export type SessionState =
+  | { status: "authenticated"; session: Session }
+  | { status: "unauthenticated" }
+  | { status: "denied" };
+
+export const signInUrl = `${baseUrl}/auth/github`;
+
+export async function fetchSession(): Promise<SessionState> {
+  const response = await fetch(`${baseUrl}/auth/session`, { credentials: "same-origin" });
+
+  if (response.status === 401) {
+    return { status: "unauthenticated" };
+  }
+  if (response.status === 403) {
+    return { status: "denied" };
+  }
+  if (!response.ok) {
+    throw new Error("Failed to load session");
+  }
+
+  const result = sessionSchema.safeParse(await response.json());
+  if (!result.success) {
+    throw new Error("Failed to load session");
+  }
+  return { status: "authenticated", session: result.data };
+}
+
+export async function logout(csrfToken: string): Promise<void> {
+  const response = await fetch(`${baseUrl}/auth/logout`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "X-CSRF-Token": csrfToken },
+  });
+
+  if (!response.ok) {
+    throw new Error("Failed to sign out");
+  }
+}
+
 export async function fetchCards(): Promise<Card[]> {
-  const response = await fetch(`${baseUrl}/cards`);
+  const response = await fetch(`${baseUrl}/cards`, { credentials: "same-origin" });
+  if (response.status === 401) {
+    throw new AuthRequiredError();
+  }
   if (!response.ok) {
     throw new Error("Failed to load cards");
   }
@@ -15,12 +71,17 @@ export async function fetchCards(): Promise<Card[]> {
   return result.data;
 }
 
-export async function createCard(title: string): Promise<Card> {
+export async function createCard(title: string, csrfToken: string): Promise<Card> {
   const response = await fetch(`${baseUrl}/cards`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
     body: JSON.stringify({ title }),
   });
+
+  if (response.status === 401) {
+    throw new AuthRequiredError();
+  }
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: "unknown_error" }));

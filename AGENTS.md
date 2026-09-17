@@ -54,3 +54,27 @@ Human approval is required before merging, production deployment, destructive
 migrations, secrets or permission changes, external service creation or spend,
 security exceptions, dependency updates, rollback, or production data access.
 Agents never hold persistent VPS credentials.
+
+## GitHub approval protocol
+
+- Request every human decision on the relevant GitHub issue or pull request;
+  Orca and agent terminals are not approval records.
+- The request must name a unique gate id, the exact proposed action and target
+  (including commit SHA or dependency version when applicable), evidence,
+  material risks, rollback, and the exact approval command.
+- The human owner approves by commenting `APPROVE <gate-id>` from GitHub user
+  id `325861437`. A rejection uses `REJECT <gate-id>: <reason>`. The human must
+  type this comment directly in the GitHub web or mobile UI.
+- Agents must never post, quote as a standalone command, or submit an
+  `APPROVE` or `REJECT` response on the human's behalf, even though their GitHub
+  CLI actions use the owner's account.
+- Reactions, approvals in chat or Orca, and vague comments such as “continue”,
+  “okay”, or “LGTM” do not satisfy a high-impact gate.
+- Approval is scoped to the stated target and expires if its commit SHA,
+  versions, permissions, migration plan, deployment target, or risk statement
+  changes materially.
+- Before acting, the coordinator verifies the approving comment's immutable
+  GitHub user id, records its URL, and resolves the matching Orca decision gate.
+- Where GitHub provides a stronger native gate, use it: the human clicks the PR
+  merge control, approves the production Environment, and performs secret or
+  permission changes directly.

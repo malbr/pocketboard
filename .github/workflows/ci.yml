@@ -9,7 +9,11 @@ permissions:
   contents: read
 
 env:
-  DATABASE_URL: postgres://pocketboard:pocketboard@localhost:5432/pocketboard
+  DATABASE_URL: postgres://pocketboard:pocketboard@127.0.0.1:5432/pocketboard
+  # Runners already set this; stating it makes the contract visible. The
+  # PostgreSQL-backed suites fail rather than skip when it is set, so a missing
+  # database cannot pass as a green run.
+  CI: "true"
 
 jobs:
   build-and-test:

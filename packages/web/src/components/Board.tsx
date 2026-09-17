@@ -1,19 +1,40 @@
 import { useEffect, useState } from "react";
 import type { Card } from "@pocketboard/shared";
-import { createCard, fetchCards } from "../api/client";
+import { AuthRequiredError, createCard, fetchCards } from "../api/client";
 import { Column } from "./Column";
 import { CardForm } from "./CardForm";
 
-export function Board() {
+interface BoardProps {
+  csrfToken: string;
+  /** Called when the API reports the session is gone mid-session. */
+  onAuthLost?: () => void;
+}
+
+export function Board({ csrfToken, onAuthLost }: BoardProps) {
   const [cards, setCards] = useState<Card[]>([]);
 
   useEffect(() => {
-    fetchCards().then(setCards).catch(() => setCards([]));
-  }, []);
+    fetchCards()
+      .then(setCards)
+      .catch((error: unknown) => {
+        if (error instanceof AuthRequiredError) {
+          onAuthLost?.();
+          return;
+        }
+        setCards([]);
+      });
+  }, [onAuthLost]);
 
   async function handleCreate(title: string) {
-    const created = await createCard(title);
-    setCards((current) => [created, ...current]);
+    try {
+      const created = await createCard(title, csrfToken);
+      setCards((current) => [created, ...current]);
+    } catch (error) {
+      if (error instanceof AuthRequiredError) {
+        onAuthLost?.();
+      }
+      throw error;
+    }
   }
 
   const byStatus = {

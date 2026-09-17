@@ -8,6 +8,13 @@
       "when": 1789391232889,
       "tag": "0000_parallel_leo",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789526400000,
+      "tag": "0001_owner_sessions",
+      "breakpoints": true
     }
   ]
 }
