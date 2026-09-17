@@ -11,10 +11,20 @@ services:
     volumes:
       - pocketboard-postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pocketboard"]
+      # -h forces a TCP probe. Without it pg_isready uses the Unix socket, which
+      # the entrypoint's temporary initdb server (listen_addresses='') also
+      # answers on — so on a first-run volume the container reports healthy,
+      # `docker compose up --wait` returns, and migrations still race a port
+      # that is not listening yet. Host, port, and database match the
+      # DATABASE_URL the migration runner uses.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U pocketboard -d pocketboard"]
       interval: 2s
       timeout: 2s
       retries: 15
+      # initdb legitimately fails the TCP probe for several seconds. Failures in
+      # this window do not count against `retries`, so a cold start is not
+      # marked unhealthy for doing exactly what it is supposed to do.
+      start_period: 30s
 
 volumes:
   pocketboard-postgres:

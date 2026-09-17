@@ -1,4 +1,8 @@
 import { defineConfig } from "drizzle-kit";
+import { loadRepositoryEnvFile } from "./src/config/repository-root";
+
+// Same reason as src/db/migrate.ts: drizzle-kit runs from `packages/api`.
+loadRepositoryEnvFile();
 
 export default defineConfig({
   dialect: "postgresql",

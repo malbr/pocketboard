@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import net from "node:net";
+import { repositoryRoot, resolveFromRepositoryRoot } from "./repository-root";
 
 /**
  * Secrets are never read from the environment directly. The environment only
@@ -54,7 +55,7 @@ const DEFAULT_APP_BASE_URL = "http://127.0.0.1:5173";
 
 type AuthEnv = Record<string, string | undefined>;
 
-function readSecretFile(env: AuthEnv, variable: string): string {
+function readSecretFile(env: AuthEnv, variable: string, baseDir: string): string {
   const filePath = env[variable];
   if (!filePath || filePath.trim() === "") {
     throw new AuthConfigError("missing_env", variable);
@@ -62,7 +63,9 @@ function readSecretFile(env: AuthEnv, variable: string): string {
 
   let raw: string;
   try {
-    raw = fs.readFileSync(filePath, "utf8");
+    // A relative path is relative to the repository, never to whichever
+    // workspace directory npm happened to start the process in.
+    raw = fs.readFileSync(resolveFromRepositoryRoot(filePath.trim(), baseDir), "utf8");
   } catch {
     // The underlying error can embed the path but never the contents; we drop
     // it anyway so nothing about the secret store leaks into a stack trace.
@@ -76,9 +79,9 @@ function readSecretFile(env: AuthEnv, variable: string): string {
   return value;
 }
 
-function readOwnerGitHubUserId(env: AuthEnv): number {
+function readOwnerGitHubUserId(env: AuthEnv, baseDir: string): number {
   const variable = "OWNER_GITHUB_USER_ID_FILE";
-  const raw = readSecretFile(env, variable);
+  const raw = readSecretFile(env, variable, baseDir);
 
   // GitHub numeric user IDs are immutable, unlike the login handle, so they are
   // the only safe thing to authorize against.
@@ -165,17 +168,21 @@ function readTrustedProxies(env: AuthEnv, nodeEnv: string | undefined): string[]
   return entries;
 }
 
-export function loadAuthConfig(env: AuthEnv, nodeEnv = env.NODE_ENV): AuthConfig {
-  const sessionSecret = readSecretFile(env, "SESSION_SECRET_FILE");
+export function loadAuthConfig(
+  env: AuthEnv,
+  nodeEnv = env.NODE_ENV,
+  secretBaseDir = repositoryRoot,
+): AuthConfig {
+  const sessionSecret = readSecretFile(env, "SESSION_SECRET_FILE", secretBaseDir);
   if (sessionSecret.length < MIN_SESSION_SECRET_LENGTH) {
     throw new AuthConfigError("weak_session_secret", "SESSION_SECRET_FILE");
   }
 
   return {
-    githubClientId: readSecretFile(env, "GITHUB_OAUTH_CLIENT_ID_FILE"),
-    githubClientSecret: readSecretFile(env, "GITHUB_OAUTH_CLIENT_SECRET_FILE"),
+    githubClientId: readSecretFile(env, "GITHUB_OAUTH_CLIENT_ID_FILE", secretBaseDir),
+    githubClientSecret: readSecretFile(env, "GITHUB_OAUTH_CLIENT_SECRET_FILE", secretBaseDir),
     sessionSecret,
-    ownerGitHubUserId: readOwnerGitHubUserId(env),
+    ownerGitHubUserId: readOwnerGitHubUserId(env, secretBaseDir),
     appBaseUrl: readAppBaseUrl(env),
     cookieSecure: nodeEnv === "production",
     sessionTtlMs: SESSION_TTL_MS,

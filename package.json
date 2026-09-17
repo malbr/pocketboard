@@ -10,7 +10,7 @@
   ],
   "scripts": {
     "dev": "npm run db:up && npm run db:migrate --workspace=packages/api && concurrently -k -n api,web \"npm run dev --workspace=packages/api\" \"npm run dev --workspace=packages/web\"",
-    "db:up": "docker compose up -d postgres",
+    "db:up": "docker compose up -d --wait --wait-timeout 60 postgres",
     "db:down": "docker compose down",
     "db:migrate": "npm run db:migrate --workspace=packages/api",
     "lint": "npm run lint --workspaces --if-present && eslint e2e",

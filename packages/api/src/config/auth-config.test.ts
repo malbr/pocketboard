@@ -43,6 +43,32 @@ describe("loadAuthConfig", () => {
     expect(config.ownerGitHubUserId).toBe(325861437);
   });
 
+  it("resolves a relative secret file path from the repository root, not the working directory", () => {
+    // `npm run dev --workspace=packages/api` runs with cwd `packages/api`, where
+    // the documented `./secrets/...` paths do not exist.
+    validEnv();
+
+    const config = loadAuthConfig(
+      {
+        GITHUB_OAUTH_CLIENT_ID_FILE: "./client-id",
+        GITHUB_OAUTH_CLIENT_SECRET_FILE: "./client-secret",
+        SESSION_SECRET_FILE: "./session-secret",
+        OWNER_GITHUB_USER_ID_FILE: "./owner-id",
+      },
+      "development",
+      secretsDir,
+    );
+
+    expect(config.githubClientId).toBe("Iv1.placeholder");
+    expect(config.ownerGitHubUserId).toBe(325861437);
+  });
+
+  it("leaves an absolute secret file path alone, so root-owned production files still load", () => {
+    const config = loadAuthConfig(validEnv(), "development", path.join(secretsDir, "unused-root"));
+
+    expect(config.githubClientSecret).toBe("placeholder-secret-value");
+  });
+
   it("trims surrounding whitespace so a trailing newline in a secret file is harmless", () => {
     const config = loadAuthConfig(
       validEnv({

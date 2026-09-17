@@ -32,8 +32,14 @@ homepage is `http://127.0.0.1:5173` and callback is
    `github-client-id`, `github-client-secret`, `session-secret`, and
    `owner-github-user-id`.
 3. Keep only file paths in `.env`; never paste secret values into `.env`, Git,
-   GitHub issues, Orca prompts, or agent chat.
-4. Run `npm run dev`.
+   GitHub issues, Orca prompts, or agent chat. Keep `.env` and `secrets/` at the
+   repository root: the paths in `.env` resolve from there, not from whichever
+   directory a script runs in.
+4. Run `npm run dev`. It waits for PostgreSQL to report healthy before applying
+   migrations, so the first run on a cold Docker daemon takes a few extra
+   seconds instead of failing with a refused connection. If it stops after 60
+   seconds, the container never became healthy — check `docker compose ps` and
+   `docker compose logs postgres`.
 5. Open `http://127.0.0.1:5173`, choose **Sign in with GitHub**, and authorize
    using the owner account.
 6. Create a card and refresh the page to verify PostgreSQL persistence.

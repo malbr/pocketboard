@@ -13,6 +13,13 @@ Requirements: Node.js 24+, npm 11+, Docker (for local PostgreSQL only).
 Copy `.env.example` to `.env` if you need to override defaults (the API and
 web app already default to the values below).
 
+`.env` lives at the repository root and is read from there by the API and by
+the migration runner, both of which npm starts inside `packages/api`. Relative
+paths in it — including the four secret-file paths — resolve from the
+repository root too, so `./secrets/session-secret` means the same file whether
+you run `npm run dev` at the root or `npm run db:migrate --workspace=packages/api`
+from anywhere. Variables already set in your shell win over `.env`.
+
 ### Owner authentication
 
 The API is owner-only and **will not start without its auth configuration**.
@@ -51,9 +58,17 @@ npm install
 npm run dev
 ```
 
-`npm run dev` starts a local PostgreSQL container (`docker compose up -d
-postgres`), applies Drizzle migrations, then runs the API (http://127.0.0.1:3000)
+`npm run dev` starts a local PostgreSQL container, waits for it to report
+healthy, applies Drizzle migrations, then runs the API (http://127.0.0.1:3000)
 and the web app (http://127.0.0.1:5173) together.
+
+The wait is the point: `docker compose up -d` returns while PostgreSQL is still
+starting, so on a cold start the migration step used to fail with a refused
+connection. `npm run db:up` passes `--wait`, which blocks on the container's
+healthcheck and gives up after 60 seconds with a clear error. That healthcheck
+probes PostgreSQL over TCP at the same host, port, and database the migration
+uses — not over the Unix socket, which the entrypoint's temporary
+initialization server answers on while the published port is still closed.
 
 ## Checks
 

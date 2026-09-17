@@ -1,7 +1,12 @@
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { loadRepositoryEnvFile } from "../config/repository-root";
 import { createDbClient } from "./client";
+
+// Migrations run as a workspace script from `packages/api`, so DATABASE_URL has
+// to come from the repository-root `.env` rather than the current directory.
+loadRepositoryEnvFile();
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://pocketboard:pocketboard@127.0.0.1:5432/pocketboard";
