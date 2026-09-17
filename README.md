@@ -91,6 +91,34 @@ pipeline can never report green after quietly running none of the
 authorization, expiry, and CSRF cases. GitHub Actions runs them against an
 ephemeral PostgreSQL service, alongside one Chromium end-to-end test.
 
+## The board
+
+The board shows **one status at a time**. A row of buttons above the heading
+names Backlog, Doing, and Done with their current counts; the selected one
+carries `aria-pressed` and fills with the accent colour, and choosing another
+replaces the page below it. Nothing about the board is hidden behind a hover.
+
+Each card leads with the step that follows from where it already is: **Start**
+in Backlog, **Finish** in Doing, **Reopen** in Done. The other destination and
+**Delete** stay quiet but keep names that say which card moves and where, so
+rows that all read "Start" stay distinguishable to a screen reader or to voice
+control. New cards always go into Backlog, whichever status is on screen, and
+the board switches to Backlog so the new card is visible.
+
+Everything is reachable with the keyboard alone, in the order the page reads:
+sign out, the three status buttons, the title field, **Add card**, then each
+row's actions. Every stop draws a 3px focus ring. Deleting still asks for
+confirmation by name in the browser's own dialog.
+
+The board states each say what happened and what to do next: reading the board,
+a load failure with **Try again**, an empty status naming what fills it, a
+failed change, and a change refused as stale. A refused change never repaints
+the board: the card stays where the owner last read it, the row says it was
+changed somewhere else, and the message names the reload that catches up.
+
+See `docs/adr/0003-focused-lane-board-ui.md` for the decision and the human
+selection it came from.
+
 ## API
 
 | Route | Purpose |

@@ -15,37 +15,56 @@ export function AuthGate() {
 
   useEffect(load, [load]);
 
+  // Every state before the board is its own page, so each one carries the main
+  // landmark and the product name as its heading. The board replaces that
+  // heading with the status being read, which is the subject of that page.
   if (state.status === "loading") {
-    return <p role="status">Checking your session…</p>;
+    return (
+      <main className="gate">
+        <h1 className="gate__title">PocketBoard</h1>
+        <p className="gate__text" role="status">
+          Checking your session…
+        </p>
+      </main>
+    );
   }
 
   if (state.status === "error") {
     return (
-      <div role="alert">
-        <p>Could not check your session.</p>
-        <button type="button" onClick={load}>
+      <main className="gate">
+        <h1 className="gate__title">PocketBoard</h1>
+        <p className="gate__alert" role="alert">
+          Could not check your session.
+        </p>
+        <button type="button" className="gate__retry" onClick={load}>
           Try again
         </button>
-      </div>
+      </main>
     );
   }
 
   if (state.status === "unauthenticated") {
     return (
-      <main>
-        <h1>PocketBoard</h1>
-        <p>Sign in to see your board.</p>
-        <a href={signInUrl}>Sign in with GitHub</a>
+      <main className="gate">
+        <h1 className="gate__title">PocketBoard</h1>
+        <p className="gate__text">Sign in to see your board.</p>
+        <a className="gate__link" href={signInUrl}>
+          Sign in with GitHub
+        </a>
       </main>
     );
   }
 
   if (state.status === "denied") {
     return (
-      <main>
-        <h1>PocketBoard</h1>
-        <p role="alert">This GitHub account does not have access to this board.</p>
-        <a href={signInUrl}>Sign in with a different account</a>
+      <main className="gate">
+        <h1 className="gate__title">PocketBoard</h1>
+        <p className="gate__alert" role="alert">
+          This GitHub account does not have access to this board.
+        </p>
+        <a className="gate__link" href={signInUrl}>
+          Sign in with a different account
+        </a>
       </main>
     );
   }
@@ -64,13 +83,14 @@ export function AuthGate() {
   }
 
   return (
-    <>
-      <header>
-        <button type="button" onClick={handleSignOut}>
+    <div className="app">
+      <header className="app__header">
+        <p className="app__product">PocketBoard</p>
+        <button type="button" className="app__signout" onClick={handleSignOut}>
           Sign out
         </button>
       </header>
       <Board csrfToken={state.session.csrfToken} onAuthLost={load} />
-    </>
+    </div>
   );
 }

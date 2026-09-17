@@ -17,12 +17,13 @@ requirements, approvals, code review evidence, or release history live.
 | Production VPS | Not assigned yet | Not deployed; issues #7, #8, and #9 cover build, deployment, and operational proof |
 
 `main` contains owner-only GitHub authentication (PR #11, merged 2026-09-17), so
-every card route on `main` already requires the owner's GitHub session, and
-moving cards between columns (#4, PR #13, merged 2026-09-17).
+every card route on `main` already requires the owner's GitHub session, moving
+cards between columns (#4, PR #13, merged 2026-09-17), and deleting a card
+(#5, PR #14, merged 2026-09-17).
 
-Deleting a card (#5) is **not** on `main`. It is pending this pull request's
-review and the human owner's merge approval. Nothing is active on a VPS until
-the owner also approves a production release.
+The focused-lane board UI (#6) is **not** on `main`. It is pending review and
+the human owner's merge approval. Nothing is active on a VPS until the owner
+also approves a production release.
 
 ## Run PocketBoard locally
 
@@ -45,18 +46,31 @@ homepage is `http://127.0.0.1:5173` and callback is
    `docker compose logs postgres`.
 5. Open `http://127.0.0.1:5173`, choose **Sign in with GitHub**, and authorize
    using the owner account.
-6. Create a card and refresh the page to verify PostgreSQL persistence, then
-   move it to **Doing** and refresh again.
-7. To see the stale-write guard: open the board in two tabs, move the same card
+6. The board opens on **Backlog**. The buttons above the heading switch between
+   Backlog, Doing, and Done and show how many cards are in each; only the
+   selected status is on screen.
+7. Create a card and refresh the page to verify PostgreSQL persistence. New
+   cards always land in Backlog, whichever status was showing. Choose **Start**
+   on it, then the **Doing** button, and refresh again.
+8. Check the keyboard path without touching the mouse: `Tab` reaches Sign out,
+   the three status buttons, the title field, **Add card**, then each row's
+   Start, second destination, and Delete, in that order. `Enter` or `Space`
+   activates whatever is focused, and every stop draws a visible focus ring.
+   Narrow the window to a phone width and repeat; nothing should scroll
+   sideways.
+9. To see the stale-write guard: open the board in two tabs, move the same card
    in one, then move it in the other. The second tab keeps the board it was
-   showing and explains that a reload is needed; it does not silently undo the
-   first move.
-8. On the #5 branch, choose **Delete** on a card. The browser asks for
-   confirmation by name; **Cancel** changes nothing. Confirming removes the card
-   from the board, and it stays gone after a refresh. Deleting the same card
-   from a second, stale tab is refused the same way a stale move is.
-9. Stop the processes with `Ctrl+C`. Run `npm run db:down` when the local
-   PostgreSQL container is no longer needed.
+   showing, marks that card as changed somewhere else, and explains that a
+   reload is needed; it does not silently undo the first move.
+10. Choose **Delete** on a card. The browser asks for confirmation by name;
+    **Cancel** changes nothing. Confirming removes the card from the board, and
+    it stays gone after a refresh. Deleting the same card from a second, stale
+    tab is refused the same way a stale move is.
+11. To see the load-failure path, stop the API with the web app still running
+    and reload. The board says it did not load and offers **Try again**, which
+    works once the API is back.
+12. Stop the processes with `Ctrl+C`. Run `npm run db:down` when the local
+    PostgreSQL container is no longer needed.
 
 Use `127.0.0.1`, not `localhost`; the OAuth callback must exactly match the URL
 registered at GitHub.
