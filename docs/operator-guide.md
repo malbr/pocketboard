@@ -115,6 +115,10 @@ An approval is valid only when the comment author has immutable GitHub user id
 `325861437` and the target has not changed. The coordinator records the comment
 URL in its handoff and resolves the corresponding Orca decision gate. General
 chat approval, emoji reactions, and approval of a different SHA are invalid.
+The human must type the approval directly in GitHub web or mobile; agents are
+forbidden from submitting either approval command. For merge, production
+deployment, and secret or permission changes, use GitHub's native human control
+or perform the action manually rather than delegating the final click.
 
 To receive these requests, open the PocketBoard repository, choose **Watch →
 Custom**, and enable Issues and Pull requests. In GitHub notification settings,
