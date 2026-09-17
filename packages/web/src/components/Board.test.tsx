@@ -10,6 +10,7 @@ function makeCard(overrides: Partial<Card> = {}): Card {
     title: "Existing card",
     status: "backlog",
     createdAt: new Date().toISOString(),
+    version: 1,
     ...overrides,
   };
 }
@@ -68,6 +69,180 @@ describe("Board", () => {
         headers: expect.objectContaining({ "X-CSRF-Token": csrfToken }),
       }),
     );
+  });
+
+  it("moves a card to Doing and shows it in that column", async () => {
+    const user = userEvent.setup();
+    const card = makeCard({ title: "Move me" });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify([card]), { status: 200 }));
+
+    render(<Board csrfToken={csrfToken} />);
+    await screen.findByText("Move me");
+
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...card, status: "doing", version: 2 }), { status: 200 }),
+    );
+
+    await user.click(screen.getByRole("button", { name: 'Move "Move me" to Doing' }));
+
+    const doingColumn = await screen.findByTestId("column-doing");
+    await waitFor(() => expect(within(doingColumn).getByText("Move me")).toBeInTheDocument());
+    expect(within(screen.getByTestId("column-backlog")).queryByText("Move me")).toBeNull();
+
+    expect(fetch).toHaveBeenLastCalledWith(
+      `/api/cards/${card.id}`,
+      expect.objectContaining({
+        method: "PATCH",
+        headers: expect.objectContaining({ "X-CSRF-Token": csrfToken }),
+        body: JSON.stringify({ status: "doing", version: 1 }),
+      }),
+    );
+  });
+
+  it("keeps the board it has and says how to recover when a move is stale", async () => {
+    const user = userEvent.setup();
+    const card = makeCard({ title: "Contested" });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify([card]), { status: 200 }));
+
+    render(<Board csrfToken={csrfToken} />);
+    await screen.findByText("Contested");
+
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          error: "card_version_conflict",
+          card: { ...card, status: "done", version: 2 },
+        }),
+        { status: 409 },
+      ),
+    );
+
+    await user.click(screen.getByRole("button", { name: 'Move "Contested" to Doing' }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Contested");
+    expect(alert).toHaveTextContent("Done");
+    expect(alert).toHaveTextContent(/reload/i);
+
+    // The board the owner was looking at is left exactly as it was.
+    expect(within(screen.getByTestId("column-backlog")).getByText("Contested")).toBeInTheDocument();
+    expect(within(screen.getByTestId("column-doing")).queryByText("Contested")).toBeNull();
+    expect(within(screen.getByTestId("column-done")).queryByText("Contested")).toBeNull();
+  });
+
+  it("reports a move the API refused for any other reason", async () => {
+    const user = userEvent.setup();
+    const card = makeCard({ title: "Move me" });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify([card]), { status: 200 }));
+
+    render(<Board csrfToken={csrfToken} />);
+    await screen.findByText("Move me");
+
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "card_not_found" }), { status: 404 }),
+    );
+
+    await user.click(screen.getByRole("button", { name: 'Move "Move me" to Doing' }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Move me");
+    expect(within(screen.getByTestId("column-backlog")).getByText("Move me")).toBeInTheDocument();
+  });
+
+  it("keeps the stale-move guidance while a different card moves successfully", async () => {
+    const user = userEvent.setup();
+    const contested = makeCard({ title: "Contested" });
+    const other = makeCard({ title: "Other card" });
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify([contested, other]), { status: 200 }),
+    );
+
+    render(<Board csrfToken={csrfToken} />);
+    await screen.findByText("Contested");
+
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          error: "card_version_conflict",
+          card: { ...contested, status: "done", version: 2 },
+        }),
+        { status: 409 },
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: 'Move "Contested" to Doing' }));
+    await screen.findByRole("alert");
+
+    // "Contested" is still held at the version that just conflicted, so the
+    // next move that can succeed is necessarily a different card.
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...other, status: "doing", version: 2 }), { status: 200 }),
+    );
+    await user.click(screen.getByRole("button", { name: 'Move "Other card" to Doing' }));
+
+    const doingColumn = screen.getByTestId("column-doing");
+    await waitFor(() => expect(within(doingColumn).getByText("Other card")).toBeInTheDocument());
+
+    // "Contested" is still stale, so its recovery guidance has to survive.
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Contested");
+    expect(alert).toHaveTextContent(/reload/i);
+  });
+
+  it("keeps the stale-move guidance when a different card's move fails outright", async () => {
+    const user = userEvent.setup();
+    const contested = makeCard({ title: "Contested" });
+    const other = makeCard({ title: "Other card" });
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify([contested, other]), { status: 200 }),
+    );
+
+    render(<Board csrfToken={csrfToken} />);
+    await screen.findByText("Contested");
+
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          error: "card_version_conflict",
+          card: { ...contested, status: "done", version: 2 },
+        }),
+        { status: 409 },
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: 'Move "Contested" to Doing' }));
+    await screen.findByRole("alert");
+
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "internal_error" }), { status: 500 }),
+    );
+    await user.click(screen.getByRole("button", { name: 'Move "Other card" to Doing' }));
+
+    // A failure elsewhere says nothing about "Contested", which is still stale.
+    await waitFor(() => {
+      const alert = screen.getByRole("alert");
+      expect(alert).toHaveTextContent("Contested");
+      expect(alert).toHaveTextContent(/reload/i);
+    });
+  });
+
+  it("clears an ordinary move failure once a later move succeeds", async () => {
+    const user = userEvent.setup();
+    const card = makeCard({ title: "Move me" });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify([card]), { status: 200 }));
+
+    render(<Board csrfToken={csrfToken} />);
+    await screen.findByText("Move me");
+
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "internal_error" }), { status: 500 }),
+    );
+    await user.click(screen.getByRole("button", { name: 'Move "Move me" to Doing' }));
+    await screen.findByRole("alert");
+
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...card, status: "doing", version: 2 }), { status: 200 }),
+    );
+    await user.click(screen.getByRole("button", { name: 'Move "Move me" to Doing' }));
+
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
   it("asks the gate to re-check the session when the API returns 401", async () => {

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import type { Database } from "../db/client";
@@ -39,6 +40,23 @@ function postCard(
   return app.inject({
     method: "POST",
     url: "/cards",
+    headers: {
+      cookie: `${SESSION_COOKIE}=${auth.cookie}`,
+      "x-csrf-token": auth.csrfToken,
+    },
+    payload,
+  });
+}
+
+function moveCard(
+  app: FastifyInstance,
+  auth: { cookie: string; csrfToken: string },
+  cardId: string,
+  payload: Record<string, unknown>,
+): Promise<LightMyRequestResponse> {
+  return app.inject({
+    method: "PATCH",
+    url: `/cards/${cardId}`,
     headers: {
       cookie: `${SESSION_COOKIE}=${auth.cookie}`,
       "x-csrf-token": auth.csrfToken,
@@ -126,6 +144,133 @@ describe.skipIf(!databaseAvailable)("card routes (real PostgreSQL)", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual([]);
+  });
+
+  it("moves a card to Doing and returns the persisted card", async () => {
+    const { app, ...auth } = await signedInApp(db);
+    const created = (await postCard(app, auth, { title: "Move me" })).json();
+
+    const response = await moveCard(app, auth, created.id, {
+      status: "doing",
+      version: created.version,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ id: created.id, title: "Move me", status: "doing" });
+
+    const rows = await db.select().from(cards);
+    expect(rows[0].status).toBe("doing");
+  });
+
+  it("refuses a stale move and reports the card as it now stands", async () => {
+    const { app, ...auth } = await signedInApp(db);
+    const created = (await postCard(app, auth, { title: "Contested" })).json();
+
+    const firstMove = await moveCard(app, auth, created.id, {
+      status: "doing",
+      version: created.version,
+    });
+    expect(firstMove.statusCode).toBe(200);
+
+    // A second browser still holding the version it loaded before the move.
+    const staleMove = await moveCard(app, auth, created.id, {
+      status: "done",
+      version: created.version,
+    });
+
+    expect(staleMove.statusCode).toBe(409);
+    expect(staleMove.json()).toEqual({
+      error: "card_version_conflict",
+      card: firstMove.json(),
+    });
+
+    const rows = await db.select().from(cards);
+    expect(rows[0].status).toBe("doing");
+  });
+
+  it("rejects a malformed card identifier before touching the database", async () => {
+    const { app, ...auth } = await signedInApp(db);
+
+    const response = await moveCard(app, auth, "not-a-uuid", { status: "doing", version: 1 });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: "invalid_card_input" });
+  });
+
+  it("rejects a move to a column the board does not have", async () => {
+    const { app, ...auth } = await signedInApp(db);
+    const created = (await postCard(app, auth, { title: "Stay put" })).json();
+
+    const response = await moveCard(app, auth, created.id, {
+      status: "archived",
+      version: created.version,
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: "invalid_card_input" });
+
+    const rows = await db.select().from(cards);
+    expect(rows[0].status).toBe("backlog");
+  });
+
+  it.each([
+    ["a missing token", {}],
+    ["a non-numeric token", { version: "1" }],
+    ["a zero token", { version: 0 }],
+  ])("rejects a move carrying %s", async (_name, versionPart) => {
+    const { app, ...auth } = await signedInApp(db);
+    const created = (await postCard(app, auth, { title: "Stay put" })).json();
+
+    const response = await moveCard(app, auth, created.id, { status: "doing", ...versionPart });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: "invalid_card_input" });
+
+    const rows = await db.select().from(cards);
+    expect(rows[0].status).toBe("backlog");
+  });
+
+  it("reports a move of a card that does not exist as not found", async () => {
+    const { app, ...auth } = await signedInApp(db);
+
+    const response = await moveCard(app, auth, randomUUID(), {
+      status: "doing",
+      version: 1,
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: "card_not_found" });
+  });
+
+  it("refuses a move from a caller with no session", async () => {
+    const { app } = await signedInApp(db);
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: `/cards/${randomUUID()}`,
+      payload: { status: "doing", version: 1 },
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toEqual({ error: "authentication_required" });
+  });
+
+  it("refuses a move that carries no CSRF token", async () => {
+    const { app, ...auth } = await signedInApp(db);
+    const created = (await postCard(app, auth, { title: "Stay put" })).json();
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: `/cards/${created.id}`,
+      headers: { cookie: `${SESSION_COOKIE}=${auth.cookie}` },
+      payload: { status: "doing", version: created.version },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: "csrf_token_invalid" });
+
+    const rows = await db.select().from(cards);
+    expect(rows[0].status).toBe("backlog");
   });
 
   it("persists cards durably in the cards table", async () => {

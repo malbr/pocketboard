@@ -2,8 +2,8 @@
 
 PocketBoard is a small, non-critical board used to prove the AI-assisted
 delivery workflow end to end. The product is intentionally narrow: after the
-owner signs in with GitHub, they can create and list Backlog cards. It contains
-no customer data or payment flow.
+owner signs in with GitHub, they can create cards and move them among Backlog,
+Doing, and Done. It contains no customer data or payment flow.
 
 GitHub is the system of record. Orca coordinates work; it is not where final
 requirements, approvals, code review evidence, or release history live.
@@ -16,18 +16,20 @@ requirements, approvals, code review evidence, or release history live.
 | Local API health | `http://127.0.0.1:3000/health` | Available while the API is running |
 | Production VPS | Not assigned yet | Not deployed; issues #7, #8, and #9 cover build, deployment, and operational proof |
 
-The `main` branch currently contains the first unauthenticated card slice.
-Owner-only GitHub authentication is in PR #11 and is not active on `main` or a
-VPS until the human owner approves the merge and a later production release.
+`main` contains owner-only GitHub authentication: PR #11 merged on 2026-09-17,
+so every card route on `main` already requires the owner's GitHub session.
 
-## Run the authenticated branch locally
+Moving cards between columns (#4) is **not** on `main`. It is pending this pull
+request's review and the human owner's merge approval. Nothing is active on a
+VPS until the owner also approves a production release.
+
+## Run PocketBoard locally
 
 Requirements: Node.js 24+, npm 11+, Docker, and the local GitHub OAuth App whose
 homepage is `http://127.0.0.1:5173` and callback is
 `http://127.0.0.1:5173/api/auth/github/callback`.
 
-1. In the PR #11 worktree, install dependencies and copy `.env.example` to
-   `.env`.
+1. In your worktree, install dependencies and copy `.env.example` to `.env`.
 2. Create these ignored local files under `secrets/`:
    `github-client-id`, `github-client-secret`, `session-secret`, and
    `owner-github-user-id`.
@@ -42,8 +44,13 @@ homepage is `http://127.0.0.1:5173` and callback is
    `docker compose logs postgres`.
 5. Open `http://127.0.0.1:5173`, choose **Sign in with GitHub**, and authorize
    using the owner account.
-6. Create a card and refresh the page to verify PostgreSQL persistence.
-7. Stop the processes with `Ctrl+C`. Run `npm run db:down` when the local
+6. Create a card and refresh the page to verify PostgreSQL persistence. On the
+   #4 branch, move it to **Doing** and refresh again.
+7. On the #4 branch, to see the stale-write guard: open the board in two tabs,
+   move the same card in one, then move it in the other. The second tab keeps
+   the board it was showing and explains that a reload is needed; it does not
+   silently undo the first move.
+8. Stop the processes with `Ctrl+C`. Run `npm run db:down` when the local
    PostgreSQL container is no longer needed.
 
 Use `127.0.0.1`, not `localhost`; the OAuth callback must exactly match the URL
