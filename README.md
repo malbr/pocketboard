@@ -3,6 +3,9 @@
 See `CONTEXT.md` for product and architecture context, and `AGENTS.md` for
 agent operating rules.
 
+For the current access status, local usage, and the small set of Orca/GitHub
+signals the human owner should monitor, see `docs/operator-guide.md`.
+
 ## Local development
 
 Requirements: Node.js 24+, npm 11+, Docker (for local PostgreSQL only).
