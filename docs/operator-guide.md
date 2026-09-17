@@ -2,8 +2,8 @@
 
 PocketBoard is a small, non-critical board used to prove the AI-assisted
 delivery workflow end to end. The product is intentionally narrow: after the
-owner signs in with GitHub, they can create cards and move them among Backlog,
-Doing, and Done. It contains no customer data or payment flow.
+owner signs in with GitHub, they can create cards, move them among Backlog,
+Doing, and Done, and delete them. It contains no customer data or payment flow.
 
 GitHub is the system of record. Orca coordinates work; it is not where final
 requirements, approvals, code review evidence, or release history live.
@@ -16,12 +16,13 @@ requirements, approvals, code review evidence, or release history live.
 | Local API health | `http://127.0.0.1:3000/health` | Available while the API is running |
 | Production VPS | Not assigned yet | Not deployed; issues #7, #8, and #9 cover build, deployment, and operational proof |
 
-`main` contains owner-only GitHub authentication: PR #11 merged on 2026-09-17,
-so every card route on `main` already requires the owner's GitHub session.
+`main` contains owner-only GitHub authentication (PR #11, merged 2026-09-17), so
+every card route on `main` already requires the owner's GitHub session, and
+moving cards between columns (#4, PR #13, merged 2026-09-17).
 
-Moving cards between columns (#4) is **not** on `main`. It is pending this pull
-request's review and the human owner's merge approval. Nothing is active on a
-VPS until the owner also approves a production release.
+Deleting a card (#5) is **not** on `main`. It is pending this pull request's
+review and the human owner's merge approval. Nothing is active on a VPS until
+the owner also approves a production release.
 
 ## Run PocketBoard locally
 
@@ -44,13 +45,17 @@ homepage is `http://127.0.0.1:5173` and callback is
    `docker compose logs postgres`.
 5. Open `http://127.0.0.1:5173`, choose **Sign in with GitHub**, and authorize
    using the owner account.
-6. Create a card and refresh the page to verify PostgreSQL persistence. On the
-   #4 branch, move it to **Doing** and refresh again.
-7. On the #4 branch, to see the stale-write guard: open the board in two tabs,
-   move the same card in one, then move it in the other. The second tab keeps
-   the board it was showing and explains that a reload is needed; it does not
-   silently undo the first move.
-8. Stop the processes with `Ctrl+C`. Run `npm run db:down` when the local
+6. Create a card and refresh the page to verify PostgreSQL persistence, then
+   move it to **Doing** and refresh again.
+7. To see the stale-write guard: open the board in two tabs, move the same card
+   in one, then move it in the other. The second tab keeps the board it was
+   showing and explains that a reload is needed; it does not silently undo the
+   first move.
+8. On the #5 branch, choose **Delete** on a card. The browser asks for
+   confirmation by name; **Cancel** changes nothing. Confirming removes the card
+   from the board, and it stays gone after a refresh. Deleting the same card
+   from a second, stale tab is refused the same way a stale move is.
+9. Stop the processes with `Ctrl+C`. Run `npm run db:down` when the local
    PostgreSQL container is no longer needed.
 
 Use `127.0.0.1`, not `localhost`; the OAuth callback must exactly match the URL

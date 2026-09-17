@@ -12,10 +12,11 @@ interface ColumnProps {
   status: CardStatus;
   cards: Card[];
   onMove: (card: Card, status: CardStatus) => void;
+  onDelete: (card: Card) => void;
   children?: React.ReactNode;
 }
 
-export function Column({ status, cards, onMove, children }: ColumnProps) {
+export function Column({ status, cards, onMove, onDelete, children }: ColumnProps) {
   return (
     <section data-testid={`column-${status}`}>
       <h2>{columnLabels[status]}</h2>
@@ -38,6 +39,13 @@ export function Column({ status, cards, onMove, children }: ColumnProps) {
                   {columnLabels[target]}
                 </button>
               ))}
+            <button
+              type="button"
+              aria-label={`Delete "${card.title}"`}
+              onClick={() => onDelete(card)}
+            >
+              Delete
+            </button>
           </li>
         ))}
       </ul>

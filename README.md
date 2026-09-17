@@ -101,6 +101,7 @@ ephemeral PostgreSQL service, alongside one Chromium end-to-end test.
 | `POST /api/auth/logout` | Destroys the session (requires a CSRF token) |
 | `GET /api/cards`, `POST /api/cards` | Owner-only; `POST` requires a CSRF token |
 | `PATCH /api/cards/:cardId` | Owner-only; moves a card between columns (requires a CSRF token) |
+| `DELETE /api/cards/:cardId` | Owner-only; deletes a card (requires a CSRF token) |
 
 Protected routes answer `401 authentication_required` without a usable session
 and `403 access_denied` for a session that is not the owner's. Mutations send
@@ -114,6 +115,7 @@ the column it should end up in and the version it is based on:
 
 ```http
 PATCH /api/cards/3fa85f64-5717-4562-b3fc-2c963f66afa6
+Content-Type: application/json
 X-CSRF-Token: <token from GET /api/auth/session>
 
 { "status": "doing", "version": 1 }
@@ -131,6 +133,36 @@ a newer one. The browser keeps the board it was showing and explains that a
 reload is needed. See
 `docs/adr/0002-card-move-optimistic-concurrency.md`.
 
+### Deleting a card
+
+A delete carries the same concurrency token and nothing else, so a card that
+changed since the browser read it cannot be removed by a request that never saw
+the change:
+
+```http
+DELETE /api/cards/3fa85f64-5717-4562-b3fc-2c963f66afa6
+Content-Type: application/json
+X-CSRF-Token: <token from GET /api/auth/session>
+
+{ "version": 1 }
+```
+
+| Response | Meaning |
+| --- | --- |
+| `200` + the card | Deleted; the body is the card as it stood at the version that was removed |
+| `400 invalid_card_input` | Malformed id, or a missing/invalid token |
+| `404 card_not_found` | No such card — including a card already deleted |
+| `409 card_version_conflict` | The card changed since `version`; the body carries the card as it now stands |
+
+The version check is part of the `DELETE ... RETURNING`, so the row is removed
+only if it is still the row the caller saw, and the returned row is the only
+record of the card left — every card mutation answers with the version it acted
+on, as `docs/adr/0002-card-move-optimistic-concurrency.md` requires. In the
+browser, deleting asks for
+confirmation by name first; a refused delete leaves the board untouched and says
+that a reload is needed, because the rest of the board is exactly as old as the
+card that turned out to be stale or already gone.
+
 The shared Zod schemas in `packages/shared` are the authoritative transport
 contract; this table documents the same shapes by hand. There is no generated
 OpenAPI artifact in the repository yet — #7 owns generating one and enforcing
@@ -143,6 +175,6 @@ The underlying message goes to the server log, never to the caller.
 
 ## Scope of this slice
 
-Create cards, list them, and move them among Backlog, Doing, and Done without
-losing a concurrent change — all restricted to the owner's GitHub account.
-There is no production deployment in this slice.
+Create cards, list them, move them among Backlog, Doing, and Done, and delete
+them deliberately — all without losing a concurrent change, and all restricted
+to the owner's GitHub account. There is no production deployment in this slice.

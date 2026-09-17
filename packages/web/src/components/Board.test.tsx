@@ -24,6 +24,8 @@ describe("Board", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    // The delete cases spy on window.confirm; no other case may inherit it.
+    vi.restoreAllMocks();
   });
 
   it("renders the Backlog, Doing, and Done columns", async () => {
@@ -243,6 +245,180 @@ describe("Board", () => {
     await user.click(screen.getByRole("button", { name: 'Move "Move me" to Doing' }));
 
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("asks before deleting and sends nothing when the owner cancels", async () => {
+    const user = userEvent.setup();
+    const card = makeCard({ title: "Keep me" });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify([card]), { status: 200 }));
+    const confirmed = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    render(<Board csrfToken={csrfToken} />);
+    await screen.findByText("Keep me");
+    vi.mocked(fetch).mockClear();
+
+    await user.click(screen.getByRole("button", { name: 'Delete "Keep me"' }));
+
+    expect(confirmed).toHaveBeenCalledWith(expect.stringContaining("Keep me"));
+    expect(confirmed.mock.calls[0][0]).toMatch(/delete/i);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(within(screen.getByTestId("column-backlog")).getByText("Keep me")).toBeInTheDocument();
+  });
+
+  it("deletes a confirmed card and removes it from the board", async () => {
+    const user = userEvent.setup();
+    const card = makeCard({ title: "Delete me", version: 3 });
+    const other = makeCard({ title: "Other card" });
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify([card, other]), { status: 200 }),
+    );
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<Board csrfToken={csrfToken} />);
+    await screen.findByText("Delete me");
+
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify(card), { status: 200 }));
+
+    await user.click(screen.getByRole("button", { name: 'Delete "Delete me"' }));
+
+    await waitFor(() => expect(screen.queryByText("Delete me")).toBeNull());
+    expect(screen.getByText("Other card")).toBeInTheDocument();
+
+    expect(fetch).toHaveBeenLastCalledWith(
+      `/api/cards/${card.id}`,
+      expect.objectContaining({
+        method: "DELETE",
+        headers: expect.objectContaining({ "X-CSRF-Token": csrfToken }),
+        body: JSON.stringify({ version: 3 }),
+      }),
+    );
+  });
+
+  it("keeps the board and says how to recover when a delete is stale", async () => {
+    const user = userEvent.setup();
+    const card = makeCard({ title: "Contested" });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify([card]), { status: 200 }));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<Board csrfToken={csrfToken} />);
+    await screen.findByText("Contested");
+
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          error: "card_version_conflict",
+          card: { ...card, status: "done", version: 2 },
+        }),
+        { status: 409 },
+      ),
+    );
+
+    await user.click(screen.getByRole("button", { name: 'Delete "Contested"' }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Contested");
+    expect(alert).toHaveTextContent("Done");
+    expect(alert).toHaveTextContent(/reload/i);
+
+    // Nothing was deleted, so the card stays exactly where the owner saw it.
+    expect(within(screen.getByTestId("column-backlog")).getByText("Contested")).toBeInTheDocument();
+  });
+
+  it("explains a delete of a card the API no longer has without repainting the board", async () => {
+    const user = userEvent.setup();
+    const card = makeCard({ title: "Already gone" });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify([card]), { status: 200 }));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<Board csrfToken={csrfToken} />);
+    await screen.findByText("Already gone");
+
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "card_not_found" }), { status: 404 }),
+    );
+
+    await user.click(screen.getByRole("button", { name: 'Delete "Already gone"' }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Already gone");
+    expect(alert).toHaveTextContent(/reload/i);
+
+    // The rest of this board is just as old as the card that turned out to be
+    // gone, so it is left alone rather than presented as current.
+    expect(within(screen.getByTestId("column-backlog")).getByText("Already gone")).toBeInTheDocument();
+  });
+
+  it("reports a delete the API refused for any other reason", async () => {
+    const user = userEvent.setup();
+    const card = makeCard({ title: "Delete me" });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify([card]), { status: 200 }));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<Board csrfToken={csrfToken} />);
+    await screen.findByText("Delete me");
+
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "internal_error" }), { status: 500 }),
+    );
+
+    await user.click(screen.getByRole("button", { name: 'Delete "Delete me"' }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Delete me");
+    expect(within(screen.getByTestId("column-backlog")).getByText("Delete me")).toBeInTheDocument();
+  });
+
+  it("keeps the stale-move guidance while a different card is deleted successfully", async () => {
+    const user = userEvent.setup();
+    const contested = makeCard({ title: "Contested" });
+    const other = makeCard({ title: "Other card" });
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify([contested, other]), { status: 200 }),
+    );
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<Board csrfToken={csrfToken} />);
+    await screen.findByText("Contested");
+
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          error: "card_version_conflict",
+          card: { ...contested, status: "done", version: 2 },
+        }),
+        { status: 409 },
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: 'Move "Contested" to Doing' }));
+    await screen.findByRole("alert");
+
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify(other), { status: 200 }));
+    await user.click(screen.getByRole("button", { name: 'Delete "Other card"' }));
+
+    await waitFor(() => expect(screen.queryByText("Other card")).toBeNull());
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Contested");
+    expect(alert).toHaveTextContent(/reload/i);
+  });
+
+  it("asks the gate to re-check the session when a delete returns 401", async () => {
+    const user = userEvent.setup();
+    const onAuthLost = vi.fn();
+    const card = makeCard({ title: "Delete me" });
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify([card]), { status: 200 }));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<Board csrfToken={csrfToken} onAuthLost={onAuthLost} />);
+    await screen.findByText("Delete me");
+
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "authentication_required" }), { status: 401 }),
+    );
+
+    await user.click(screen.getByRole("button", { name: 'Delete "Delete me"' }));
+
+    await waitFor(() => expect(onAuthLost).toHaveBeenCalled());
+    expect(within(screen.getByTestId("column-backlog")).getByText("Delete me")).toBeInTheDocument();
   });
 
   it("asks the gate to re-check the session when the API returns 401", async () => {
