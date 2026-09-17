@@ -1,0 +1,217 @@
+/* THROWAWAY PROTOTYPE — Variant A only. Delete with the rest of src/prototype/. */
+
+.wb {
+  max-width: 76rem;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 0;
+}
+
+.wb__bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  align-items: baseline;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--p-rule);
+}
+
+.wb__title {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.wb__count {
+  color: var(--p-ink-2);
+  font-size: 13px;
+}
+
+.wb__loading,
+.wb__notice,
+.wb__message {
+  margin-top: 1rem;
+}
+
+.wb__message-head {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.wb__message-body {
+  max-width: 54ch;
+  margin-top: 0.25rem;
+  color: var(--p-ink-2);
+}
+
+.wb__message .wb-compose__submit {
+  margin-top: 0.75rem;
+}
+
+.wb__notice {
+  max-width: 68ch;
+  padding: 0.6rem 0.75rem;
+  border-left: 3px solid var(--p-alarm);
+  background: var(--p-alarm-wash);
+  color: var(--p-alarm);
+  font-size: 14px;
+}
+
+/* Three lanes side by side: the point of this variant is seeing the whole board
+   at once, so the lanes share the width rather than scrolling. */
+.wb__lanes {
+  display: grid;
+  gap: 1rem;
+  margin-top: 1.25rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+}
+
+.wb__lane {
+  padding: 0.75rem;
+  border: 1px solid var(--p-rule);
+  background: var(--p-surface);
+}
+
+.wb__lane-head {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--p-rule);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.wb__lane-count {
+  color: var(--p-ink-2);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.wb__lane-empty {
+  margin-top: 0.75rem;
+  color: var(--p-ink-2);
+  font-size: 14px;
+}
+
+.wb__lane-list {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.wb-card {
+  padding: 0.6rem 0.65rem;
+  border: 1px solid var(--p-rule);
+  border-radius: 3px;
+  background: var(--p-surface);
+}
+
+.wb-card__title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.wb-card__meta {
+  margin-top: 0.2rem;
+  color: var(--p-ink-2);
+  font-size: 13px;
+}
+
+.wb-card__contested {
+  margin-top: 0.35rem;
+  color: var(--p-alarm);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.wb-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.6rem;
+}
+
+.wb-card__move,
+.wb-card__delete {
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--p-edge);
+  border-radius: 3px;
+  background: var(--p-surface);
+  color: var(--p-ink);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.wb-card__move:hover {
+  border-color: var(--p-accent);
+  background: var(--p-accent-wash);
+  color: var(--p-accent);
+}
+
+.wb-card__delete {
+  margin-left: auto;
+  color: var(--p-ink-2);
+}
+
+.wb-card__delete:hover {
+  border-color: var(--p-alarm);
+  color: var(--p-alarm);
+}
+
+.wb-compose {
+  margin-top: 0.75rem;
+}
+
+.wb-compose__label {
+  display: block;
+  color: var(--p-ink-2);
+  font-size: 13px;
+}
+
+.wb-compose__row {
+  display: flex;
+  gap: 0.35rem;
+  margin-top: 0.25rem;
+}
+
+.wb-compose__input {
+  min-width: 0;
+  flex: 1;
+  padding: 0.35rem 0.45rem;
+  border: 1px solid var(--p-edge);
+  border-radius: 2px;
+  background: var(--p-surface);
+  color: var(--p-ink);
+  font: inherit;
+  font-size: 14px;
+}
+
+.wb-compose__submit {
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--p-accent);
+  border-radius: 2px;
+  background: var(--p-accent);
+  color: #ffffff;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.wb-compose__submit:disabled {
+  border-color: var(--p-edge);
+  background: var(--p-page);
+  color: var(--p-ink-2);
+  cursor: not-allowed;
+}
+
+@media (max-width: 900px) {
+  .wb__lanes {
+    grid-template-columns: 1fr;
+  }
+}

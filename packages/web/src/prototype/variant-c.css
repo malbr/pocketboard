@@ -1,0 +1,236 @@
+/* THROWAWAY PROTOTYPE — Variant C only. Delete with the rest of src/prototype/. */
+
+/* A register, not a grid: no card surfaces, no lanes, no enclosing boxes.
+   Density is the point — the whole board should fit one screen of reading. */
+
+.lg {
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 0;
+}
+
+.lg__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  align-items: baseline;
+  padding-bottom: 0.6rem;
+}
+
+.lg__title {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.lg__summary {
+  color: var(--p-ink-2);
+  font-size: 13px;
+}
+
+.lg__loading,
+.lg__message {
+  margin-bottom: 1rem;
+  color: var(--p-ink-2);
+  font-size: 14px;
+}
+
+.lg__message-head {
+  color: var(--p-ink);
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.lg__message-body {
+  max-width: 54ch;
+  margin-top: 0.25rem;
+}
+
+.lg__message .lg__add {
+  margin-top: 0.75rem;
+}
+
+.lg__notice {
+  max-width: 72ch;
+  margin-bottom: 1rem;
+  padding: 0.55rem 0.7rem;
+  border-left: 3px solid var(--p-alarm);
+  background: var(--p-alarm-wash);
+  color: var(--p-alarm);
+  font-size: 13px;
+}
+
+.lg__scroll {
+  overflow-x: auto;
+  border-top: 2px solid var(--p-ink);
+  border-bottom: 1px solid var(--p-rule);
+  background: var(--p-surface);
+}
+
+.lg__table {
+  width: 100%;
+  min-width: 44rem;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.lg__caption {
+  padding: 0.5rem 0.6rem;
+  color: var(--p-ink-2);
+  text-align: left;
+  font-size: 13px;
+}
+
+.lg__th {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--p-ink);
+  color: var(--p-ink);
+  text-align: left;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.lg__row:nth-child(even) {
+  /* A register is scanned across, so alternating rows earn their keep here in a
+     way they would not in a list of cards. */
+  background: var(--p-page);
+}
+
+.lg__cell {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--p-rule);
+  vertical-align: top;
+}
+
+.lg__cell--where {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.lg__cell--card {
+  width: 100%;
+  line-height: 1.35;
+}
+
+.lg__cell--num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The version token is an identifier the API compares, not a quantity to read;
+   monospace keeps successive revisions aligned when scanning a column. */
+.lg__cell--rev {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+}
+
+.lg__cell--move,
+.lg__cell--remove {
+  white-space: nowrap;
+}
+
+.lg__cell--blank {
+  color: var(--p-ink-2);
+}
+
+.lg__flag {
+  color: var(--p-alarm);
+  font-weight: 700;
+}
+
+.lg__command {
+  padding: 0.15rem 0.45rem;
+  border: 1px solid var(--p-edge);
+  border-radius: 2px;
+  background: var(--p-surface);
+  color: var(--p-ink);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.lg__command + .lg__command {
+  margin-left: 0.3rem;
+}
+
+.lg__command:hover {
+  border-color: var(--p-accent);
+  background: var(--p-accent-wash);
+  color: var(--p-accent);
+}
+
+.lg__command--remove:hover {
+  border-color: var(--p-alarm);
+  background: var(--p-alarm-wash);
+  color: var(--p-alarm);
+}
+
+/* The compose row reads as the next line of the register rather than a form
+   dropped beside it. */
+.lg__entry {
+  padding: 0.75rem 0.6rem 0;
+}
+
+.lg__entry-label {
+  display: block;
+  color: var(--p-ink-2);
+  font-size: 13px;
+}
+
+.lg__entry-row {
+  display: flex;
+  gap: 0.4rem;
+  max-width: 40rem;
+  margin-top: 0.3rem;
+}
+
+.lg__input {
+  min-width: 0;
+  flex: 1;
+  padding: 0.35rem 0.45rem;
+  border: 1px solid var(--p-edge);
+  border-radius: 2px;
+  background: var(--p-surface);
+  color: var(--p-ink);
+  font: inherit;
+  font-size: 14px;
+}
+
+.lg__add {
+  padding: 0.35rem 0.8rem;
+  border: 1px solid var(--p-accent);
+  border-radius: 2px;
+  background: var(--p-accent);
+  color: #ffffff;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.lg__add:disabled {
+  border-color: var(--p-edge);
+  background: var(--p-page);
+  color: var(--p-ink-2);
+  cursor: not-allowed;
+}
+
+@media (max-width: 640px) {
+  .lg__table {
+    min-width: 38rem;
+  }
+
+  /* Two commands stacked keep the row height even once the table is scrolled. */
+  .lg__command + .lg__command {
+    margin-top: 0.25rem;
+    margin-left: 0;
+  }
+
+  .lg__cell--move .lg__command {
+    display: block;
+    width: 100%;
+    text-align: left;
+  }
+}

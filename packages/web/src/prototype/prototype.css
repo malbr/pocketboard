@@ -1,0 +1,190 @@
+/* THROWAWAY PROTOTYPE — chrome only (ribbon, switcher, shared tokens).
+   Each variant brings its own layout in variant-a.css / -b.css / -c.css.
+   Delete with the rest of src/prototype/. */
+
+.prototype-root {
+  /* Two neutrals, one accent, one alarm. Every pairing used for text or for an
+     interactive edge was checked against WCAG AA; ratios are noted inline. */
+  --p-page: #f4f2ed; /* warm paper, so white surfaces read as raised without a shadow */
+  --p-surface: #ffffff;
+  --p-ink: #1b1a17; /* 15.55:1 on page, 17.40:1 on surface */
+  --p-ink-2: #55514a; /* 7.05:1 on page, 7.89:1 on surface */
+  --p-rule: #cdc7b9; /* structural hairline, never an interactive edge */
+  --p-edge: #8f8879; /* interactive edge: 3.52:1 on surface, 3.15:1 on page */
+  --p-accent: #14564a; /* 8.54:1 on surface, 7.63:1 on page */
+  --p-accent-wash: #e8f0ec;
+  --p-alarm: #8c3a12; /* 7.69:1 on surface, 6.88:1 on page */
+  --p-alarm-wash: #fdf6ec;
+
+  --p-font: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  min-height: 100vh;
+  /* Scroll room for the fixed switcher, so the focus guard in
+     PrototypeSwitcher always has somewhere to lift a focused control to. The
+     switcher measures itself and overwrites this; the fallback covers the
+     moment before it mounts. */
+  padding-bottom: var(--p-switcher-space, 7.5rem);
+  background: var(--p-page);
+  color: var(--p-ink);
+  font-family: var(--p-font);
+  font-size: 15px;
+  line-height: 1.45;
+  -webkit-text-size-adjust: 100%;
+}
+
+.prototype-root *,
+.prototype-root *::before,
+.prototype-root *::after {
+  box-sizing: border-box;
+}
+
+.prototype-root :focus-visible {
+  outline: 2px solid var(--p-accent);
+  outline-offset: 2px;
+}
+
+.prototype-root h1,
+.prototype-root h2,
+.prototype-root h3,
+.prototype-root p,
+.prototype-root ul,
+.prototype-root ol,
+.prototype-root figure {
+  margin: 0;
+}
+
+.prototype-root ul,
+.prototype-root ol {
+  padding: 0;
+  list-style: none;
+}
+
+/* ---------- Prototype ribbon -------------------------------------------- */
+/* Deliberately unlike any variant: this is scaffolding, not a design to judge. */
+
+.proto-ribbon {
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--p-ink);
+  background: var(--p-ink);
+  color: var(--p-page);
+}
+
+.proto-ribbon__line {
+  max-width: 68ch;
+  font-size: 13px;
+}
+
+.proto-ribbon__line + .proto-ribbon__line {
+  margin-top: 0.25rem;
+}
+
+.proto-ribbon__tag {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.proto-ribbon__question {
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.proto-ribbon__status {
+  min-height: 1.2em;
+  color: #ffffff;
+}
+
+/* ---------- Floating variant switcher ------------------------------------ */
+
+.proto-switcher {
+  position: fixed;
+  bottom: 1rem;
+  left: 50%;
+  z-index: 50;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  align-items: center;
+  justify-content: center;
+  max-width: calc(100vw - 2rem);
+  padding: 0.5rem 0.75rem;
+  transform: translateX(-50%);
+  border: 1px solid var(--p-ink);
+  border-radius: 4px;
+  background: var(--p-ink);
+  color: var(--p-page);
+  /* The one elevated surface on the page: it floats above whatever is judged. */
+  box-shadow: 0 6px 20px rgb(27 26 23 / 35%);
+}
+
+.proto-switcher :focus-visible {
+  outline-color: var(--p-page);
+}
+
+.proto-switcher__group {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.proto-switcher__step {
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--p-page);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--p-page);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.proto-switcher__step:hover {
+  background: #33312c;
+}
+
+.proto-switcher__name {
+  min-width: 15ch;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.proto-switcher__state {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  font-size: 13px;
+}
+
+.proto-switcher__select {
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--p-page);
+  border-radius: 3px;
+  background: var(--p-ink);
+  color: var(--p-page);
+  font: inherit;
+  font-size: 13px;
+}
+
+.proto-hint {
+  padding: 0.75rem 1.25rem 0;
+  color: var(--p-ink-2);
+  font-size: 13px;
+}
+
+/* ---------- Shared, unstyled-on-purpose helpers -------------------------- */
+
+.proto-visually-hidden {
+  position: absolute;
+  overflow: hidden;
+  clip-path: inset(50%);
+  width: 1px;
+  height: 1px;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .prototype-root * {
+    transition: none !important;
+  }
+}
