@@ -58,6 +58,69 @@ registered at GitHub.
 7. Merge only after approval. Close Orca terminals and remove obsolete
    worktrees after the result is safely recorded in GitHub.
 
+## Starting development through Orca
+
+1. In GitHub, select one issue labelled `ready-for-agent`.
+2. In Orca, create a worktree linked to that issue from `main`. Name it after
+   the issue, for example `issue-4-move-cards`.
+3. Start one writer terminal in that worktree. Kiro is the preferred
+   implementation writer; Claude Code is the controlled fallback while Kiro is
+   unavailable. Never start both as writers for the same issue.
+4. Give the writer only the issue URL and this instruction: read `AGENTS.md`,
+   the issue, `CONTEXT.md`, and relevant ADRs; load files selectively; implement
+   and test the vertical slice; create a PR; then post a compact handoff.
+5. After the writer stops, start Codex as a read-only reviewer. It may report
+   findings but must not edit the writer's worktree.
+6. If work reaches a human gate, create an Orca decision gate and post the same
+   request on the linked GitHub issue or PR. Work remains blocked until the
+   GitHub approval is verified.
+
+The CLI equivalents for the first two steps are:
+
+```powershell
+orca open
+orca worktree create --repo "name:Team Of AI" `
+  --name "issue-4-move-cards" --issue 4 --base-branch main --setup run --json
+```
+
+Start a writer terminal after the worktree exists:
+
+```powershell
+orca terminal create --worktree issue:4 --title "issue-4-writer" `
+  --command "kiro-cli" --focus --json
+```
+
+Use `--command "claude"` only for the approved fallback. Do not add
+`--trust-all-tools`; permission bypass is prohibited.
+
+## GitHub approval workflow
+
+The coordinator posts this structure on the relevant issue or pull request and
+mentions `@malbr`:
+
+```text
+## Human approval required
+Gate: <unique-gate-id>
+Action: <one exact action>
+Target: <commit SHA, versions, environment, or migration>
+Evidence: <checks and review result>
+Risk: <material failure modes>
+Rollback: <specific recovery action>
+
+Approve by commenting exactly: APPROVE <unique-gate-id>
+Reject by commenting: REJECT <unique-gate-id>: <reason>
+```
+
+An approval is valid only when the comment author has immutable GitHub user id
+`325861437` and the target has not changed. The coordinator records the comment
+URL in its handoff and resolves the corresponding Orca decision gate. General
+chat approval, emoji reactions, and approval of a different SHA are invalid.
+
+To receive these requests, open the PocketBoard repository, choose **Watch →
+Custom**, and enable Issues and Pull requests. In GitHub notification settings,
+enable web or email delivery for participating/watching conversations and set
+Actions to notify at least on failed workflow runs.
+
 ## What to monitor in Orca
 
 - **Issue identity:** every task names exactly one GitHub issue and expected
