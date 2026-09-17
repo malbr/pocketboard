@@ -100,11 +100,41 @@ ephemeral PostgreSQL service, alongside one Chromium end-to-end test.
 | `GET /api/auth/session` | Returns the current owner session and a CSRF token |
 | `POST /api/auth/logout` | Destroys the session (requires a CSRF token) |
 | `GET /api/cards`, `POST /api/cards` | Owner-only; `POST` requires a CSRF token |
+| `PATCH /api/cards/:cardId` | Owner-only; moves a card between columns (requires a CSRF token) |
 
 Protected routes answer `401 authentication_required` without a usable session
 and `403 access_denied` for a session that is not the owner's. Mutations send
 the CSRF token from `GET /api/auth/session` in an `X-CSRF-Token` header; a
 missing or mismatched token is `403 csrf_token_invalid`.
+
+### Moving a card
+
+Every card carries an integer `version` — its concurrency token. A move sends
+the column it should end up in and the version it is based on:
+
+```http
+PATCH /api/cards/3fa85f64-5717-4562-b3fc-2c963f66afa6
+X-CSRF-Token: <token from GET /api/auth/session>
+
+{ "status": "doing", "version": 1 }
+```
+
+| Response | Meaning |
+| --- | --- |
+| `200` + the card | Moved; the card comes back with its incremented `version` |
+| `400 invalid_card_input` | Malformed id, unknown column, or a missing/invalid token |
+| `404 card_not_found` | No such card |
+| `409 card_version_conflict` | The card changed since `version`; the body carries the card as it now stands |
+
+The version check happens inside the `UPDATE`, so a stale move never overwrites
+a newer one. The browser keeps the board it was showing and explains that a
+reload is needed. See
+`docs/adr/0002-card-move-optimistic-concurrency.md`.
+
+The shared Zod schemas in `packages/shared` are the authoritative transport
+contract; this table documents the same shapes by hand. There is no generated
+OpenAPI artifact in the repository yet — #7 owns generating one and enforcing
+drift against it.
 
 Any failure the API did not anticipate answers `500 {"error":"internal_error"}`.
 The underlying message goes to the server log, never to the caller.
@@ -113,5 +143,6 @@ The underlying message goes to the server log, never to the caller.
 
 ## Scope of this slice
 
-Create and list Backlog cards, restricted to the owner's GitHub account. There
-is no production deployment in this slice.
+Create cards, list them, and move them among Backlog, Doing, and Done without
+losing a concurrent change — all restricted to the owner's GitHub account.
+There is no production deployment in this slice.

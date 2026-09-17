@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { CardStatus, createCardInputSchema, cardSchema, cardListSchema } from "./card";
+import {
+  CardErrorCode,
+  CardStatus,
+  cardVersionConflictSchema,
+  createCardInputSchema,
+  cardSchema,
+  cardListSchema,
+  cardIdParamsSchema,
+  moveCardInputSchema,
+} from "./card";
 
 describe("createCardInputSchema", () => {
   it("accepts a valid title", () => {
@@ -35,8 +44,19 @@ describe("cardSchema", () => {
       title: "Write ADR",
       status: CardStatus.Backlog,
       createdAt: new Date().toISOString(),
+      version: 1,
     });
     expect(result.success).toBe(true);
+  });
+
+  it("rejects a card that carries no concurrency token", () => {
+    const result = cardSchema.safeParse({
+      id: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      title: "Write ADR",
+      status: CardStatus.Backlog,
+      createdAt: new Date().toISOString(),
+    });
+    expect(result.success).toBe(false);
   });
 
   it("rejects an invalid status", () => {
@@ -45,6 +65,7 @@ describe("cardSchema", () => {
       title: "Write ADR",
       status: "blocked",
       createdAt: new Date().toISOString(),
+      version: 1,
     });
     expect(result.success).toBe(false);
   });
@@ -55,7 +76,84 @@ describe("cardSchema", () => {
       title: "Write ADR",
       status: CardStatus.Backlog,
       createdAt: new Date().toISOString(),
+      version: 1,
     });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("moveCardInputSchema", () => {
+  it("accepts a move to Doing carrying the card's concurrency token", () => {
+    const result = moveCardInputSchema.safeParse({ status: CardStatus.Doing, version: 1 });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a column the board does not have", () => {
+    const result = moveCardInputSchema.safeParse({ status: "archived", version: 1 });
+    expect(result.success).toBe(false);
+  });
+
+  it.each([["1"], [0], [-1], [1.5], [Number.NaN], [null]])(
+    "rejects %o as a concurrency token",
+    (version) => {
+      const result = moveCardInputSchema.safeParse({ status: CardStatus.Done, version });
+      expect(result.success).toBe(false);
+    },
+  );
+
+  it("rejects a move that smuggles in extra fields", () => {
+    const result = moveCardInputSchema.safeParse({
+      status: CardStatus.Done,
+      version: 1,
+      title: "renamed on the side",
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("cardVersionConflictSchema", () => {
+  const currentCard = {
+    id: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    title: "Write ADR",
+    status: CardStatus.Doing,
+    createdAt: new Date().toISOString(),
+    version: 2,
+  };
+
+  it("carries the card as it now stands so a stale browser can recover", () => {
+    const result = cardVersionConflictSchema.safeParse({
+      error: CardErrorCode.CardVersionConflict,
+      card: currentCard,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a conflict that does not say what the card now is", () => {
+    const result = cardVersionConflictSchema.safeParse({
+      error: CardErrorCode.CardVersionConflict,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects another error code wearing the conflict shape", () => {
+    const result = cardVersionConflictSchema.safeParse({
+      error: CardErrorCode.CardNotFound,
+      card: currentCard,
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("cardIdParamsSchema", () => {
+  it("accepts a well-formed card identifier", () => {
+    const result = cardIdParamsSchema.safeParse({
+      cardId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a malformed card identifier", () => {
+    const result = cardIdParamsSchema.safeParse({ cardId: "not-a-uuid" });
     expect(result.success).toBe(false);
   });
 });
@@ -73,6 +171,7 @@ describe("cardListSchema", () => {
         title: "Write ADR",
         status: CardStatus.Backlog,
         createdAt: new Date().toISOString(),
+        version: 1,
       },
     ]);
     expect(result.success).toBe(true);
@@ -85,6 +184,7 @@ describe("cardListSchema", () => {
         title: "Write ADR",
         status: "not-a-status",
         createdAt: new Date().toISOString(),
+        version: 1,
       },
     ]);
     expect(result.success).toBe(false);

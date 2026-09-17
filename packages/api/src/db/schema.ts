@@ -1,4 +1,4 @@
-import { index, jsonb, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { index, integer, jsonb, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 export const cardStatusEnum = pgEnum("card_status", ["backlog", "doing", "done"]);
 
@@ -7,6 +7,12 @@ export const cards = pgTable("cards", {
   title: text("title").notNull(),
   status: cardStatusEnum("status").notNull().default("backlog"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  /**
+   * The card's concurrency token. Every accepted move increments it, and a move
+   * only applies when the caller's token still matches the stored one, so two
+   * browsers editing the same card cannot silently overwrite each other.
+   */
+  version: integer("version").notNull().default(1),
 });
 
 /**

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuthRequiredError, createCard, fetchCards, fetchSession, logout } from "./client";
+import { AuthRequiredError, createCard, fetchCards, fetchSession, logout, moveCard } from "./client";
 
 const csrfToken = "test-csrf-token";
 
@@ -26,6 +26,7 @@ describe("api client", () => {
       title: "New task",
       status: "backlog",
       createdAt: new Date().toISOString(),
+      version: 1,
     };
     vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify(created), { status: 201 }));
 
@@ -39,6 +40,49 @@ describe("api client", () => {
         headers: expect.objectContaining({ "X-CSRF-Token": csrfToken }),
       }),
     );
+  });
+
+  it("moves a card with its concurrency token and a CSRF token", async () => {
+    const card = {
+      id: crypto.randomUUID(),
+      title: "Move me",
+      status: "doing",
+      createdAt: new Date().toISOString(),
+      version: 2,
+    };
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify(card), { status: 200 }));
+
+    await expect(moveCard(card.id, "doing", 1, csrfToken)).resolves.toEqual(card);
+
+    expect(fetch).toHaveBeenCalledWith(
+      `/api/cards/${card.id}`,
+      expect.objectContaining({
+        method: "PATCH",
+        credentials: "same-origin",
+        headers: expect.objectContaining({ "X-CSRF-Token": csrfToken }),
+        body: JSON.stringify({ status: "doing", version: 1 }),
+      }),
+    );
+  });
+
+  it("surfaces a stale move as a conflict carrying the card as it now stands", async () => {
+    const current = {
+      id: crypto.randomUUID(),
+      title: "Contested",
+      status: "done",
+      createdAt: new Date().toISOString(),
+      version: 3,
+    };
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "card_version_conflict", card: current }), {
+        status: 409,
+      }),
+    );
+
+    await expect(moveCard(current.id, "doing", 1, csrfToken)).rejects.toMatchObject({
+      name: "CardVersionConflictError",
+      card: current,
+    });
   });
 
   it("rejects a malformed card list on a successful response", async () => {
@@ -60,6 +104,7 @@ describe("api client", () => {
   it.each([
     ["fetchCards", () => fetchCards()],
     ["createCard", () => createCard("New task", csrfToken)],
+    ["moveCard", () => moveCard(crypto.randomUUID(), "doing", 1, csrfToken)],
   ])("surfaces a 401 from %s as AuthRequiredError", async (_name, call) => {
     vi.mocked(fetch).mockResolvedValueOnce(
       new Response(JSON.stringify({ error: "authentication_required" }), { status: 401 }),

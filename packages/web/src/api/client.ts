@@ -1,8 +1,10 @@
 import {
   cardListSchema,
   cardSchema,
+  cardVersionConflictSchema,
   sessionSchema,
   type Card,
+  type CardStatus,
   type Session,
 } from "@pocketboard/shared";
 
@@ -13,6 +15,18 @@ export class AuthRequiredError extends Error {
   constructor() {
     super("authentication_required");
     this.name = "AuthRequiredError";
+  }
+}
+
+/**
+ * Thrown when the API refused a move because the browser was working from a
+ * card it had already outgrown. It carries the card as the API now holds it, so
+ * the UI can say what changed rather than only that something did.
+ */
+export class CardVersionConflictError extends Error {
+  constructor(readonly card: Card) {
+    super("card_version_conflict");
+    this.name = "CardVersionConflictError";
   }
 }
 
@@ -67,6 +81,42 @@ export async function fetchCards(): Promise<Card[]> {
   const result = cardListSchema.safeParse(body);
   if (!result.success) {
     throw new Error("Failed to load cards");
+  }
+  return result.data;
+}
+
+export async function moveCard(
+  cardId: string,
+  status: CardStatus,
+  version: number,
+  csrfToken: string,
+): Promise<Card> {
+  const response = await fetch(`${baseUrl}/cards/${cardId}`, {
+    method: "PATCH",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+    body: JSON.stringify({ status, version }),
+  });
+
+  if (response.status === 401) {
+    throw new AuthRequiredError();
+  }
+
+  if (response.status === 409) {
+    const conflict = cardVersionConflictSchema.safeParse(await response.json());
+    if (!conflict.success) {
+      throw new Error("Failed to move card");
+    }
+    throw new CardVersionConflictError(conflict.data.card);
+  }
+
+  if (!response.ok) {
+    throw new Error("Failed to move card");
+  }
+
+  const result = cardSchema.safeParse(await response.json());
+  if (!result.success) {
+    throw new Error("Failed to move card");
   }
   return result.data;
 }
