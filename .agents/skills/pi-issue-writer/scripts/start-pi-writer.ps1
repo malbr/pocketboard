@@ -73,6 +73,7 @@ $skillRoot = Join-Path $repoRoot '.agents\skills'
 $piArgs = @(
     '--provider', $selected.Provider,
     '--model', $selected.Model,
+    '--thinking', 'max',
     '--name', "issue-$Issue-pi-writer",
     '--no-context-files',
     '--append-system-prompt', (Join-Path $repoRoot 'AGENTS.md'),
