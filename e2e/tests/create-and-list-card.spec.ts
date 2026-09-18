@@ -48,7 +48,8 @@ test("a signed-out visitor is never shown the card form or a delete control", as
   await page.goto("/");
 
   await expect(page.getByRole("link", { name: "Sign in with GitHub" })).toBeVisible();
-  await expect(page.getByLabel("New card title")).toHaveCount(0);
+  await expect(page.getByLabel("Add a card to Backlog")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Add card" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /^Delete/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Start:/ })).toHaveCount(0);
 });

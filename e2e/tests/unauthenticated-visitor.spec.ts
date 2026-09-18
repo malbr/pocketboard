@@ -14,6 +14,8 @@ test("an unauthenticated visitor is asked to sign in and sees no board", async (
   await expect(page.getByRole("heading", { name: "Backlog" })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Doing" })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Done" })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "Board status" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Sign out" })).toHaveCount(0);
 });
 
 test("the sign-in link points at the API's GitHub authorization route", async ({ page }) => {

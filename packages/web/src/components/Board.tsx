@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import type { Card, CardStatus } from "@pocketboard/shared";
+import { useCallback, useEffect, useState } from "react";
+import { CardStatus, type Card } from "@pocketboard/shared";
 import {
   AuthRequiredError,
   CardNotFoundError,
@@ -9,7 +9,7 @@ import {
   fetchCards,
   moveCard,
 } from "../api/client";
-import { Column, columnLabels } from "./Column";
+import { CardRow, cardAge, statusLabels, statusOrder } from "./CardRow";
 import { CardForm } from "./CardForm";
 
 /**
@@ -20,11 +20,19 @@ import { CardForm } from "./CardForm";
  * here can bring it up to date — only a reload can. Whatever happens to some
  * other card, succeeding or failing, says nothing about the contested one, so
  * that guidance outlives both and an ordinary failure never displaces it.
+ *
+ * `cardId` lets the lane mark the contested card where it still sits, so the
+ * message at the top of the page and the row it is about are connected even
+ * when the lane holds a dozen other cards.
  */
 interface CardNotice {
   text: string;
   reloadRequired: boolean;
+  cardId: string;
 }
+
+/** Whether the card list has been read yet, and whether reading it worked. */
+type LoadPhase = "loading" | "ready" | "failed";
 
 /**
  * The board the API refused to change is the board the owner has been reading.
@@ -35,10 +43,29 @@ function conflictNotice(current: Card, retry: string): CardNotice {
   return {
     text:
       `“${current.title}” was changed somewhere else and is now in ` +
-      `${columnLabels[current.status]}. Reload the page to catch up with the board, ` +
+      `${statusLabels[current.status]}. Reload the page to catch up with the board, ` +
       `then ${retry} it again.`,
     reloadRequired: true,
+    cardId: current.id,
   };
+}
+
+/** What the owner is looking at, said in terms of the cards actually there. */
+function leadLine(cards: Card[]): string {
+  const oldest = cards.reduce((a, b) => (a.createdAt <= b.createdAt ? a : b));
+  const count = `${cards.length} ${cards.length === 1 ? "card" : "cards"}`;
+  return `${count}. The oldest has been on the board ${cardAge(oldest.createdAt)}.`;
+}
+
+/** An empty status says why it is empty and what fills it. */
+function emptyLine(status: CardStatus): string {
+  if (status === CardStatus.Backlog) {
+    return "No cards in Backlog. Add one above and it starts here.";
+  }
+  if (status === CardStatus.Doing) {
+    return "Nothing is in Doing. Start a card in Backlog and it moves here.";
+  }
+  return "Nothing has reached Done. Finish a card in Doing and it lands here.";
 }
 
 interface BoardProps {
@@ -50,23 +77,36 @@ interface BoardProps {
 export function Board({ csrfToken, onAuthLost }: BoardProps) {
   const [cards, setCards] = useState<Card[]>([]);
   const [notice, setNotice] = useState<CardNotice | null>(null);
+  const [phase, setPhase] = useState<LoadPhase>("loading");
+  const [selected, setSelected] = useState<CardStatus>(CardStatus.Backlog);
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setPhase("loading");
     fetchCards()
-      .then(setCards)
+      .then((loaded) => {
+        setCards(loaded);
+        setPhase("ready");
+      })
       .catch((error: unknown) => {
         if (error instanceof AuthRequiredError) {
+          // The gate is about to replace this view with the sign-in prompt, so
+          // there is no board state worth deciding on here.
           onAuthLost?.();
           return;
         }
-        setCards([]);
+        setPhase("failed");
       });
   }, [onAuthLost]);
+
+  useEffect(load, [load]);
 
   async function handleCreate(title: string) {
     try {
       const created = await createCard(title, csrfToken);
       setCards((current) => [created, ...current]);
+      // A card is always created into Backlog. Staying on Doing or Done would
+      // drop it into a status the owner cannot see, so the lane follows it.
+      setSelected(CardStatus.Backlog);
     } catch (error) {
       if (error instanceof AuthRequiredError) {
         onAuthLost?.();
@@ -94,7 +134,11 @@ export function Board({ csrfToken, onAuthLost }: BoardProps) {
       setNotice((current) =>
         current?.reloadRequired
           ? current
-          : { text: `“${card.title}” could not be moved. Try again.`, reloadRequired: false },
+          : {
+              text: `“${card.title}” could not be moved. Try again.`,
+              reloadRequired: false,
+              cardId: card.id,
+            },
       );
     }
   }
@@ -133,36 +177,102 @@ export function Board({ csrfToken, onAuthLost }: BoardProps) {
             `“${card.title}” was already deleted somewhere else. Reload the page to ` +
             `catch up with the board.`,
           reloadRequired: true,
+          cardId: card.id,
         });
         return;
       }
       setNotice((current) =>
         current?.reloadRequired
           ? current
-          : { text: `“${card.title}” could not be deleted. Try again.`, reloadRequired: false },
+          : {
+              text: `“${card.title}” could not be deleted. Try again.`,
+              reloadRequired: false,
+              cardId: card.id,
+            },
       );
     }
   }
 
-  const byStatus = {
-    backlog: cards.filter((card) => card.status === "backlog"),
-    doing: cards.filter((card) => card.status === "doing"),
-    done: cards.filter((card) => card.status === "done"),
-  };
+  const shown = cards.filter((card) => card.status === selected);
 
   return (
-    <main>
-      {notice && <p role="alert">{notice.text}</p>}
-      <Column
-        status="backlog"
-        cards={byStatus.backlog}
-        onMove={handleMove}
-        onDelete={handleDelete}
-      >
-        <CardForm onCreate={handleCreate} />
-      </Column>
-      <Column status="doing" cards={byStatus.doing} onMove={handleMove} onDelete={handleDelete} />
-      <Column status="done" cards={byStatus.done} onMove={handleMove} onDelete={handleDelete} />
-    </main>
+    <>
+      {phase !== "failed" && (
+        // Buttons, not a tablist: nothing here is a tab panel, and claiming
+        // that role would take over the arrow keys without providing what a
+        // tablist promises. aria-pressed carries the selection instead.
+        <nav className="lane-nav" aria-label="Board status">
+          {statusOrder.map((status) => (
+            <button
+              key={status}
+              type="button"
+              className="lane-nav__item"
+              aria-pressed={status === selected}
+              onClick={() => setSelected(status)}
+            >
+              {statusLabels[status]}
+              {phase === "ready" && (
+                <span className="lane-nav__count">
+                  {cards.filter((card) => card.status === status).length}
+                </span>
+              )}
+            </button>
+          ))}
+        </nav>
+      )}
+
+      <main className="lane">
+        {notice && (
+          <p className="lane__notice" role="alert">
+            {notice.text}
+          </p>
+        )}
+
+        {phase === "failed" ? (
+          <div role="alert">
+            <h1 className="lane__heading">The board did not load</h1>
+            <p className="lane__lead">
+              The card list could not be read, so no status can be shown. Nothing on the board
+              has been lost.
+            </p>
+            <button type="button" className="lane__retry" onClick={load}>
+              Try again
+            </button>
+          </div>
+        ) : (
+          <>
+            <h1 className="lane__heading">{statusLabels[selected]}</h1>
+            {phase === "loading" ? (
+              <p className="lane__lead" role="status">
+                Reading the board…
+              </p>
+            ) : (
+              shown.length > 0 && <p className="lane__lead">{leadLine(shown)}</p>
+            )}
+
+            {/* Creating against a board that has not arrived yet loses the
+                card from view: the list the API is still sending replaces the
+                one holding it. The form waits for a board to add to. */}
+            {phase === "ready" && <CardForm onCreate={handleCreate} />}
+
+            {phase === "ready" && shown.length === 0 && (
+              <p className="lane__empty">{emptyLine(selected)}</p>
+            )}
+
+            <ul className="lane__list">
+              {shown.map((card) => (
+                <CardRow
+                  key={card.id}
+                  card={card}
+                  contested={Boolean(notice?.reloadRequired) && notice?.cardId === card.id}
+                  onMove={handleMove}
+                  onDelete={handleDelete}
+                />
+              ))}
+            </ul>
+          </>
+        )}
+      </main>
+    </>
   );
 }
