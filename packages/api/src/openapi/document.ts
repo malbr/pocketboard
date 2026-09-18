@@ -43,6 +43,7 @@ const invalidCardInputSchema = z
   .strict();
 
 const healthSchema = z.object({ status: z.literal("ok") }).strict();
+const healthUnavailableSchema = z.object({ status: z.literal("unavailable") }).strict();
 
 const csrfHeader = z.object({
   "x-csrf-token": z.string().openapi({ description: "Token from GET /auth/session" }),
@@ -68,6 +69,7 @@ function buildRegistry(): OpenAPIRegistry {
   const CardNotFound = registry.register("CardNotFound", cardNotFoundSchema);
   const CardVersionConflict = registry.register("CardVersionConflict", cardVersionConflictSchema);
   const Health = registry.register("Health", healthSchema);
+  const HealthUnavailable = registry.register("HealthUnavailable", healthUnavailableSchema);
   const RateLimited = registry.register("RateLimited", rateLimitedSchema);
 
   const json = (schema: z.ZodTypeAny, description: string) => ({
@@ -102,8 +104,12 @@ function buildRegistry(): OpenAPIRegistry {
     {
       method: "get",
       path: "/health",
-      summary: "Liveness check",
-      responses: { 200: json(Health, "API is up"), ...internal },
+      summary: "Health check, including a PostgreSQL round trip",
+      responses: {
+        200: json(Health, "API is up and PostgreSQL answered"),
+        503: json(HealthUnavailable, "PostgreSQL did not answer or timed out; no detail is returned"),
+        ...internal,
+      },
     },
     {
       method: "get",

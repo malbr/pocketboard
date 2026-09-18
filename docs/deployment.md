@@ -36,7 +36,10 @@ check. The root script then:
    applied.
 5. Starts the release with `docker compose up --wait` and checks
    `127.0.0.1:8080/healthz`, `127.0.0.1:8080/api/health`, and
-   `$PUBLIC_URL/api/health` through the TLS proxy.
+   `$PUBLIC_URL/api/health` through the TLS proxy. `/api/health` answers
+   `200 {"status":"ok"}` only after a `select 1` round trip to PostgreSQL, and
+   `503 {"status":"unavailable"}` otherwise. The same holds for the API
+   container's health check and for Uptime Kuma.
 6. Requires the running `api` and `web` containers to use exactly the pulled
    images, then appends an `ok` line to `/var/lib/pocketboard/releases.log` and
    writes `/var/lib/pocketboard/current`.
