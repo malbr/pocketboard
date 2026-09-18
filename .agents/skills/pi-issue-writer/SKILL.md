@@ -11,8 +11,9 @@ description: Implements one explicitly assigned PocketBoard GitHub issue through
   files, tests, human gates, and an active single-writer lease.
 - Confirm that no Claude, Codex, Kiro, or second Pi session is writing the same
   issue. Stop if ownership is ambiguous.
-- Record the exact provider, model, reasoning setting if supported, and maximum
-  attempts on the issue. Never fail over or switch models silently.
+- Record the exact provider, model, `max` reasoning setting, and maximum
+  attempts on the issue. Never fail over, switch models, or lower reasoning
+  effort silently.
 - Start a fresh session. Never continue another model's session; Kimi in
   particular requires intact thinking history.
 
@@ -27,6 +28,9 @@ conversation into the session. Use a compact handoff when work changes owners.
 
 ## Execution
 
+- Launch every eligible Pi writer with `--thinking max`. Only a
+  reasoning-capable route with an explicit `max` mapping may act as a writer;
+  non-reasoning experimental models are evaluation-only.
 - Follow risk-based TDD and shared Zod contract rules from `AGENTS.md`.
 - Use `lean-implementation` only when the issue explicitly opts in and none of
   its exclusions apply.
