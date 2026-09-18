@@ -296,6 +296,21 @@
         ],
         "additionalProperties": false
       },
+      "HealthUnavailable": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "unavailable"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false
+      },
       "RateLimited": {
         "type": "object",
         "properties": {
@@ -317,10 +332,10 @@
   "paths": {
     "/health": {
       "get": {
-        "summary": "Liveness check",
+        "summary": "Health check, including a PostgreSQL round trip",
         "responses": {
           "200": {
-            "description": "API is up",
+            "description": "API is up and PostgreSQL answered",
             "content": {
               "application/json": {
                 "schema": {
@@ -335,6 +350,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/InternalError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "PostgreSQL did not answer or timed out; no detail is returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthUnavailable"
                 }
               }
             }

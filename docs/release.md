@@ -2,7 +2,7 @@
 
 PocketBoard publishes two container images for every commit that reaches
 `main`. Publishing is not deploying: nothing in CI touches the VPS. Deployment
-is a separate, human-approved step (issue #8).
+is a separate, human-approved step described in [production deployment](deployment.md).
 
 | Image | Contents |
 | --- | --- |
@@ -58,6 +58,7 @@ else. Every other job has `contents: read` only.
 | Static analysis | CodeQL `security-extended`, JavaScript/TypeScript and Actions | any result, of any severity |
 | Images | Trivy (digest-pinned), via `scan-image.sh` | any fixable high or critical vulnerability, or any embedded secret |
 | API contract | `npm run openapi:check` | a generated OpenAPI document that differs from the committed one |
+| Migrations | `check-migrations.mjs` | any `DROP`, `TRUNCATE`, `DELETE`, `UPDATE`, `RENAME`, column type change, or a new `NOT NULL`, constraint, or unique index on an existing table |
 | Compose | `check-production-compose.sh` plus a smoke run | a public database port, a non-internal backend, a missing limit or health check, or an unpinned image |
 
 No check has an ignore file, baseline, or allowlist. An exception needs a
@@ -124,8 +125,8 @@ itself; the approved deploy script supplies `RELEASE_SHA`, `API_DIGEST`,
 - Every long-running service has a health check, CPU, memory, and PID limits,
   and `no-new-privileges`. `api` and `web` are read-only with all capabilities
   dropped.
-- `migrate` is behind a profile and never starts with `up`. Run it once after a
-  verified backup:
+- `migrate` is behind a profile and never starts with `up`. The deploy script
+  runs it once, after a verified backup:
   `docker compose -f compose.production.yml --profile migrate run --rm migrate`.
 
 ### Secret files
@@ -145,5 +146,6 @@ root and can stay `root:root 0400`.
   job. No agent deletes packages.
 - **First-ever publish:** GHCR creates each package as private. Changing its
   visibility is an owner-only settings change.
-- **Bad release:** images are never deployed automatically. Deploy the
-  previous recorded `tag@digest` (issue #8 owns the rollback procedure).
+- **Bad release:** images are never deployed automatically. Roll back to the
+  previous release recorded on the host; see
+  [production deployment](deployment.md#recovery).

@@ -1,0 +1,115 @@
+name: Deploy
+
+# Production deploy and rollback (issue #8, ADR 0006). Runs only when the
+# owner dispatches it, and waits for the owner's approval on the `production`
+# Environment before it can read the deploy key. The key reaches one
+# forced-command SSH account that accepts only `deploy`, `rollback`, and
+# `status` requests; everything else happens in the root-owned VPS script.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: deploy a new release, roll back to an earlier successful one, or report status
+        type: choice
+        options: [deploy, rollback, status]
+        default: deploy
+      sha:
+        description: full 40-character commit SHA on main (ignored for status)
+        type: string
+        required: false
+
+permissions: {}
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # The Environment's branch policy also allows only main; this keeps a
+    # dispatch from another branch from even requesting approval.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: production
+    # `actions: read` finds the commit's CI run and downloads its release
+    # record. Nothing else is granted.
+    permissions:
+      contents: read
+      actions: read
+    env:
+      MODE: ${{ inputs.mode }}
+      SHA: ${{ inputs.sha }}
+    steps:
+      - name: Validate the request
+        run: |
+          case "$MODE" in
+            status) ;;
+            deploy|rollback)
+              [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "sha must be a full 40-character lowercase commit SHA" >&2; exit 1; } ;;
+            *) echo "unknown mode" >&2; exit 1 ;;
+          esac
+
+      - name: Checkout main
+        if: inputs.mode != 'status'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require the commit to be on main
+        if: inputs.mode != 'status'
+        run: git merge-base --is-ancestor "$SHA" HEAD
+
+      # A deploy needs the digests CI recorded when it published this commit.
+      # The run must be a push to main that fully succeeded, which includes
+      # every check and the publish job.
+      - name: Read the release record
+        if: inputs.mode == 'deploy'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          run_id="$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&branch=main&status=success" \
+            --jq '.workflow_runs[0].id // empty')"
+          [[ -n "$run_id" ]] || { echo "no successful CI run on main published $SHA" >&2; exit 1; }
+          gh run download "$run_id" --repo "$REPO" --name "release-record-$SHA" --dir "$RUNNER_TEMP/record"
+          record="$RUNNER_TEMP/record/release-record.md"
+          api="$(grep -oE "ghcr\.io/malbr/pocketboard-api@sha256:[0-9a-f]{64}" "$record" | sort -u)"
+          web="$(grep -oE "ghcr\.io/malbr/pocketboard-web@sha256:[0-9a-f]{64}" "$record" | sort -u)"
+          [[ "$api" =~ ^[^[:space:]]+$ && "$web" =~ ^[^[:space:]]+$ ]] \
+            || { echo "release record must name exactly one api and one web digest" >&2; exit 1; }
+          {
+            echo "API_DIGEST=${api#*@}"
+            echo "WEB_DIGEST=${web#*@}"
+          } >> "$GITHUB_ENV"
+          echo "CI run: https://github.com/$REPO/actions/runs/$run_id"
+          echo "api ${api#*@}"
+          echo "web ${web#*@}"
+
+      - name: Send the request to the VPS
+        env:
+          DEPLOY_KEY: ${{ secrets.PRODUCTION_DEPLOY_SSH_KEY }}
+          SSH_HOST: ${{ vars.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ vars.PRODUCTION_SSH_PORT }}
+          KNOWN_HOSTS: ${{ vars.PRODUCTION_SSH_KNOWN_HOSTS }}
+        run: |
+          [[ "$SSH_HOST" =~ ^[A-Za-z0-9.-]+$ && "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] \
+            || { echo "PRODUCTION_SSH_HOST or PRODUCTION_SSH_PORT is missing or malformed" >&2; exit 1; }
+          [[ -n "$DEPLOY_KEY" && -n "$KNOWN_HOSTS" ]] \
+            || { echo "the production Environment is missing its key or pinned host key" >&2; exit 1; }
+          case "$MODE" in
+            deploy) request="deploy $SHA $API_DIGEST $WEB_DIGEST" ;;
+            rollback) request="rollback $SHA" ;;
+            status) request="status" ;;
+          esac
+          umask 077
+          ssh_dir="$(mktemp -d)"
+          trap 'rm -rf "$ssh_dir"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" > "$ssh_dir/key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+          ssh -i "$ssh_dir/key" -p "$SSH_PORT" \
+            -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$ssh_dir/known_hosts" -o ConnectTimeout=20 \
+            "pocketboard-deploy@$SSH_HOST" "$request"

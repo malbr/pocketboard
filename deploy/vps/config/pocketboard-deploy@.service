@@ -1,0 +1,27 @@
+# Install as /etc/systemd/system/pocketboard-deploy@.service (root:root 0644).
+# One oneshot run per request; the instance name is the validated request (see
+# /usr/local/sbin/pocketboard-deploy). polkit lets only the pocketboard-deploy
+# account start it, and `systemctl start` blocks until the run finishes.
+[Unit]
+Description=PocketBoard deploy request %i
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pocketboard-deploy %i
+# Non-secret settings only (PUBLIC_URL, optional WEB_PORT). Backup credentials
+# are read by pocketboard-backup itself, so they never enter this environment.
+EnvironmentFile=/etc/pocketboard/deploy.env
+Environment=HOME=/var/lib/pocketboard DOCKER_CONFIG=/var/lib/pocketboard/docker RESTIC_CACHE_DIR=/var/cache/pocketboard-restic
+# The SSH gate prints this file back to the caller. It holds SHAs, digests,
+# health and migration output, and snapshot ids; never secret values.
+StandardOutput=truncate:/var/log/pocketboard-deploy/%i.log
+StandardError=inherit
+UMask=0022
+TimeoutStartSec=25min
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full

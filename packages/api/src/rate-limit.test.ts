@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { ApiErrorCode, rateLimitedSchema } from "@pocketboard/shared";
 import { createFakeGitHubIdentityProvider } from "./auth/testing/fake-github-identity-provider";
@@ -69,10 +69,13 @@ describe("rate limiting", () => {
   });
 
   it("never limits /health, so container and uptime checks keep working", async () => {
-    const target = await app();
+    const execute = vi.fn(async () => []);
+    const target = await app({ db: { execute } as unknown as Database });
     const responses = await hit(target, "/health", DEFAULT_ROUTE_LIMIT.max + 5);
 
     expect(responses.every((r) => r.statusCode === 200)).toBe(true);
+    // Unlimited must not mean one database query per request.
+    expect(execute.mock.calls.length).toBeLessThan(10);
   });
 
   it("counts each forwarded client separately behind a trusted proxy", async () => {

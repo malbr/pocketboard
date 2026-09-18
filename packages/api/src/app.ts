@@ -1,6 +1,7 @@
 import cookie from "@fastify/cookie";
 import csrfProtection from "@fastify/csrf-protection";
 import session, { type SessionStore } from "@fastify/session";
+import { sql } from "drizzle-orm";
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import type { GitHubIdentityProvider } from "./auth/github-identity-provider";
 import { createRequireOwner } from "./auth/require-owner";
@@ -9,6 +10,7 @@ import { PostgresSessionStore } from "./auth/session-store";
 import type { AuthConfig } from "./config/auth-config";
 import type { Database } from "./db/client";
 import { registerErrorHandler } from "./errors";
+import { createDatabaseProbe } from "./health/database-probe";
 import { registerRateLimit } from "./rate-limit";
 import { registerAuthRoutes } from "./routes/auth";
 import { registerCardRoutes } from "./routes/cards";
@@ -73,7 +75,12 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
 
   const requireOwner = createRequireOwner(authConfig.ownerGitHubUserId);
 
-  registerHealthRoutes(app);
+  registerHealthRoutes(
+    app,
+    createDatabaseProbe(() => db.execute(sql`select 1`), {
+      onFailure: (error) => app.log.warn({ err: error }, "health check could not reach the database"),
+    }),
+  );
   registerAuthRoutes(app, { config: authConfig, provider: identityProvider, requireOwner });
   registerCardRoutes(app, db, requireOwner);
 
