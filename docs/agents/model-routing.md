@@ -8,16 +8,17 @@ model traffic and does not perform automatic fallback.
 | Platform | Model and effort | Normal role |
 | --- | --- | --- |
 | Orca | No inference model; coordinator only | Creates worktrees, enforces one writer per issue, and surfaces gates |
-| Claude Code | `sonnet` alias, `high` effort (current local default) | Primary issue writer; analysis, requirements, and docs when assigned |
+| Claude Code | `sonnet` alias (currently Claude Sonnet 5), `high` effort | Primary issue writer; analysis, requirements, and docs when assigned |
 | Codex | `gpt-5.6-sol`, `high` effort by default | Architecture, UI direction, difficult debugging, security, and read-only final review |
 | Codex escalation | `gpt-6-astra`, `max` effort when available in the subscription | Highest-risk architecture, security, debugging, and release review only |
 | Pi | Explicit provider/model below, always `max` effort | Controlled issue writer |
 | Kiro | None while suspended | Paused until the human owner restores it |
 
-Claude's `sonnet` alias may resolve to a newer Sonnet release as the CLI is
-updated. Record the concrete model identifier shown by the session in the
-writer lease and handoff. Changing a platform model or effort requires a new
-lease; do not silently substitute a cheaper or stronger model.
+The local Claude Code default is `model: sonnet` and `effortLevel: high`.
+Claude's alias may resolve to a newer Sonnet release as the CLI is updated, so
+record the concrete model identifier shown by the session in the writer lease
+and handoff. Changing a platform model or effort requires a new lease; do not
+silently substitute a cheaper or stronger model.
 
 Codex or Claude may change roles only through a new issue assignment. A writer
 cannot review its own work as the independent reviewer.
