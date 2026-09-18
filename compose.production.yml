@@ -1,0 +1,173 @@
+# Production release definition. Images are referenced by the exact commit-SHA
+# tag AND digest recorded in docs/release.md, so a moved tag cannot change what
+# runs. Nothing here deploys: the approved deploy script supplies these values.
+#
+# Required variables (the deploy script sets them; Compose refuses to start
+# without them):
+#   RELEASE_SHA        full 40-character commit SHA of the release
+#   API_DIGEST         sha256:... digest of ghcr.io/malbr/pocketboard-api:RELEASE_SHA
+#   WEB_DIGEST         sha256:... digest of ghcr.io/malbr/pocketboard-web:RELEASE_SHA
+#   SECRETS_DIR        root-owned directory holding the files named below
+#
+# Files in SECRETS_DIR (root-owned, never committed):
+#   api.env                   DATABASE_URL and APP_BASE_URL for the API
+#   postgres-password         PostgreSQL password (must match DATABASE_URL)
+#   github-client-id, github-client-secret, session-secret, owner-github-user-id
+
+name: pocketboard
+
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  postgres:
+    <<: *hardening
+    image: postgres:16-alpine@sha256:3c5c8892d184f738f4fe282d14ddaa613a38f00f4189d2d94725ebe6f2909ddb
+    environment:
+      POSTGRES_USER: pocketboard
+      POSTGRES_DB: pocketboard
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    secrets:
+      - postgres-password
+    volumes:
+      - pocketboard-postgres:/var/lib/postgresql/data
+    # Deliberately no `ports`: the database is reachable only on the internal
+    # backend network.
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U pocketboard -d pocketboard"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+          pids: 200
+
+  api:
+    <<: *hardening
+    image: ghcr.io/malbr/pocketboard-api:${RELEASE_SHA:?set RELEASE_SHA}@${API_DIGEST:?set API_DIGEST}
+    env_file:
+      - ${SECRETS_DIR:?set SECRETS_DIR}/api.env
+    environment:
+      NODE_ENV: production
+      API_PORT: "3000"
+      # Only the web proxy may set X-Forwarded-*; its address is fixed below.
+      TRUSTED_PROXY_IPS: 172.31.250.10
+      GITHUB_OAUTH_CLIENT_ID_FILE: /run/secrets/github-client-id
+      GITHUB_OAUTH_CLIENT_SECRET_FILE: /run/secrets/github-client-secret
+      SESSION_SECRET_FILE: /run/secrets/session-secret
+      OWNER_GITHUB_USER_ID_FILE: /run/secrets/owner-github-user-id
+    secrets:
+      - github-client-id
+      - github-client-secret
+      - session-secret
+      - owner-github-user-id
+    read_only: true
+    cap_drop:
+      - ALL
+    # `frontend` is the only route out: the API needs egress to GitHub for the
+    # OAuth code exchange. `backend` has none.
+    networks:
+      - backend
+      - frontend
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 384M
+          pids: 200
+
+  web:
+    <<: *hardening
+    image: ghcr.io/malbr/pocketboard-web:${RELEASE_SHA:?set RELEASE_SHA}@${WEB_DIGEST:?set WEB_DIGEST}
+    # Loopback only: the host's TLS-terminating reverse proxy is the sole
+    # public entry point and must set X-Forwarded-Proto.
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8080}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    networks:
+      frontend:
+        ipv4_address: 172.31.250.10
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      api:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+          pids: 100
+
+  # One-shot migration runner. Not started by `up`; the deploy script runs it
+  # explicitly, once, after a verified backup.
+  migrate:
+    image: ghcr.io/malbr/pocketboard-api:${RELEASE_SHA:?set RELEASE_SHA}@${API_DIGEST:?set API_DIGEST}
+    profiles: ["migrate"]
+    command: ["node", "packages/api/dist/db/migrate.js"]
+    env_file:
+      - ${SECRETS_DIR:?set SECRETS_DIR}/api.env
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+networks:
+  backend:
+    internal: true
+  frontend:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+
+volumes:
+  pocketboard-postgres:
+
+secrets:
+  postgres-password:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/postgres-password
+  github-client-id:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/github-client-id
+  github-client-secret:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/github-client-secret
+  session-secret:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/session-secret
+  owner-github-user-id:
+    file: ${SECRETS_DIR:?set SECRETS_DIR}/owner-github-user-id
