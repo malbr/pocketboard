@@ -48,6 +48,24 @@ copying these rules.
 - These local skills take precedence over upstream Ponytail defaults where the
   rules differ. Do not install Ponytail hooks, MCP servers, or always-on rules.
 
+## Agent and skill routing
+
+- Follow `docs/agents/model-routing.md` for the current writer pool and model
+  selection. Record the chosen platform, provider, model, and attempt budget on
+  the issue before implementation starts; never fail over silently.
+- Kiro is paused. Do not assign work to it until the human owner explicitly
+  restores it.
+- A Pi writer must use `.agents/skills/pi-issue-writer/SKILL.md`, a fresh
+  session, and a narrow tool allowlist. A model change requires a new session
+  and compact handoff.
+- Use `.agents/skills/model-bakeoff/SKILL.md` only for controlled evaluation;
+  benchmark output is evidence, not an automatic production routing decision.
+- Use `.agents/skills/anti-slop-review/SKILL.md` after correctness and
+  accessibility checks for UI changes. It is an on-demand review gate, not
+  always-on steering.
+- See `docs/agents/skills.md` for the shared, role-specific, project-specific,
+  and temporary-context catalog.
+
 ## Human approval gates
 
 Human approval is required before merging, production deployment, destructive

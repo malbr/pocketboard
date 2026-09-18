@@ -47,17 +47,24 @@ the initial POC.
 
 ## AI team
 
-- Claude Code: product analysis, requirements, issue shaping, documentation.
-- Kiro: implementation, testing, and CI/CD.
-- Codex: architecture, UI direction, difficult debugging, security, and final
-  review.
-- Controlled substitution is allowed only for platform outage or quota
-  exhaustion. Model tier is selected separately for simple, standard, and
-  critical work.
+- Orca coordinates work but never owns product or approval decisions.
+- Claude Code is a primary issue writer and may also perform product analysis,
+  requirements, issue shaping, and documentation when assigned.
+- Pi is a controlled issue writer. Orca selects its provider and model
+  explicitly per issue; there is no automatic provider or model failover.
+- Codex owns architecture, UI direction, difficult debugging, security, and
+  final read-only review unless explicitly assigned as the sole writer.
+- Kiro is paused because its account is unavailable. It receives no work until
+  the human owner restores it.
+- Writer selection is task-based rather than platform-first. Public benchmark
+  results are hypotheses until the candidate passes a PocketBoard bake-off.
+- KiosAPI remains an approved Pi provider for this public, non-critical POC.
+  Provider use must be budget-bounded and must never receive secrets,
+  production data, or private credentials.
 - Orca coordinates at most two worktrees, one writer per issue, read-only
   reviewers, and no permission bypass.
-- Native CLI subscriptions only: no 9Router, extra API budget, or dedicated
-  context service during the POC.
+- Native CLI subscriptions remain preferred. Any Pi API route is explicit and
+  budget-capped; there is no dedicated routing or context service in the POC.
 
 ## Quality policy
 
