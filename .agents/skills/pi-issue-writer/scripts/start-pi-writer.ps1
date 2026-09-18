@@ -4,8 +4,8 @@ param(
     [ValidateRange(1, 2147483647)]
     [int]$Issue,
 
-    [ValidateSet('kios-glm', 'kios-kimi', 'tencent-kimi', 'openagentic-deepseek')]
-    [string]$Route = 'kios-glm',
+    [ValidateSet('tencent-kimi', 'openagentic-glm', 'openagentic-deepseek')]
+    [string]$Route = 'tencent-kimi',
 
     [switch]$Lean
 )
@@ -35,20 +35,15 @@ if ($Lean -and $issueData.body -notmatch '(?im)^\s*-?\s*Skills?:.*\blean-impleme
 }
 
 $routes = @{
-    'kios-glm' = @{
-        Provider = 'kiosapi'
-        Model = 'glm-5.3-flash'
-        ApiKey = 'PI_KIOS_API_KEY'
-    }
-    'kios-kimi' = @{
-        Provider = 'kiosapi'
-        Model = 'kimi-k3'
-        ApiKey = 'PI_KIOS_API_KEY'
-    }
     'tencent-kimi' = @{
         Provider = 'tencent-tokenhub'
         Model = 'kimi-k3'
         ApiKey = 'PI_TOKENHUB_API_KEY'
+    }
+    'openagentic-glm' = @{
+        Provider = 'openagentic'
+        Model = 'glm-5.3-flash'
+        ApiKey = 'PI_OPENAGENTIC_API_KEY'
     }
     'openagentic-deepseek' = @{
         Provider = 'openagentic'

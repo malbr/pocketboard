@@ -58,9 +58,10 @@ the initial POC.
   the human owner restores it.
 - Writer selection is task-based rather than platform-first. Public benchmark
   results are hypotheses until the candidate passes a PocketBoard bake-off.
-- KiosAPI remains an approved Pi provider for this public, non-critical POC.
-  Provider use must be budget-bounded and must never receive secrets,
-  production data, or private credentials.
+- KiosAPI is quarantined because its documented endpoint does not resolve.
+  It is absent from the active Pi catalogue and writer launcher. Re-enable it
+  only after endpoint, quota, model-identity, max-reasoning, and tool-call
+  conformance checks pass. Its stored key remains unused.
 - Orca coordinates at most two worktrees, one writer per issue, read-only
   reviewers, and no permission bypass.
 - Native CLI subscriptions remain preferred. Any Pi API route is explicit and

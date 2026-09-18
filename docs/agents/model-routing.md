@@ -23,19 +23,17 @@ silently substitute a cheaper or stronger model.
 Codex or Claude may change roles only through a new issue assignment. A writer
 cannot review its own work as the independent reviewer.
 
-## Initial Pi routes
+## Pi routes
 
 These routes are hypotheses derived from public benchmarks and must be tested
 against PocketBoard before promotion:
 
 | Route | Effort | Initial use |
 | --- | --- | --- |
-| KiosAPI `glm-5.3-flash` | `max` | Default low/standard-risk implementation candidate |
-| KiosAPI `kimi-k3` | `max` | Complex or longer-horizon implementation candidate |
-| Tencent TokenHub `kimi-k3` | `max` | Official-route comparison or Kimi escalation |
+| Tencent TokenHub `kimi-k3` | `max` | Default Pi writer route; official-provider Kimi candidate |
+| OpenAgentic `glm-5.3-flash` | `max` | Explicit manual alternative after its successful transport check |
 | OpenAgentic `deepseek-v4.1-flash-free` | `max` | Challenger route after identity, tool, quota, and latency checks |
-| KiosAPI `agnes-3.0-flash` | Not supported | Experimental evaluation only; never a writer |
-| KiosAPI/OpenAgentic `union-alpha` | Not supported | Experimental evaluation only; never a writer while identity remains opaque |
+| OpenAgentic `union-alpha` | Not supported | Experimental evaluation only; never a writer while identity remains opaque |
 
 Do not use experimental routes for mergeable auth, authorization, migrations,
 security controls, release, deployment, or incident work.
@@ -56,6 +54,9 @@ quality benchmark:
 Do not assign a KiosAPI writer until its documented endpoint resolves and a
 fresh conformance check passes. Do not promote the OpenAgentic DeepSeek route
 until a bounded reasoning test confirms that its gateway honors `max`.
+KiosAPI is absent from both the active Pi catalogue and the launcher. Its
+non-secret provider definition is retained outside Pi's active configuration
+for a controlled retest; its API key remains stored but unused.
 
 ## Selection protocol
 
@@ -96,8 +97,8 @@ From a dedicated issue worktree:
 
 ```powershell
 & .\.agents\skills\pi-issue-writer\scripts\start-pi-writer.ps1 `
-  -Issue 17 `
-  -Route kios-glm
+  -Issue 123 `
+  -Route tencent-kimi
 ```
 
 The launcher uses a fresh named Pi session, passes canonical `AGENTS.md`, loads
