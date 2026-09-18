@@ -1,0 +1,16 @@
+# Build context is the repository root. Keep it to what the images compile, so
+# no local secret, environment file, or build output can reach an image layer.
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+.git
+.github
+.env
+.env.*
+secrets
+e2e
+playwright-report
+test-results
+coverage
+docs
+*.md

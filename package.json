@@ -17,6 +17,8 @@
     "typecheck": "npm run typecheck --workspaces --if-present && tsc --noEmit -p e2e/tsconfig.json",
     "test": "npm run test --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
+    "openapi:generate": "npm run openapi:generate --workspace=packages/api",
+    "openapi:check": "npm run openapi:check --workspace=packages/api",
     "e2e": "playwright test --config=e2e/playwright.config.ts"
   },
   "devDependencies": {

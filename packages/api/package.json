@@ -5,13 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsx src/bundle/cli.ts",
     "start": "tsx src/server.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "eslint src",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "tsx src/db/migrate.ts"
+    "db:migrate": "tsx src/db/migrate.ts",
+    "openapi:generate": "tsx src/openapi/cli.ts write",
+    "openapi:check": "tsx src/openapi/cli.ts check"
   },
   "dependencies": {
     "@fastify/cookie": "11.1.2",
@@ -26,8 +28,10 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@asteasolutions/zod-to-openapi": "7.3.4",
     "@types/node": "^22.9.0",
     "drizzle-kit": "^0.31.10",
+    "esbuild": "0.28.2",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "vitest": "^2.1.4"

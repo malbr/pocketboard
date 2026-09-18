@@ -5,8 +5,9 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: read
+# No job inherits any token permission; each job grants only what it needs.
+# Approved in https://github.com/malbr/pocketboard/issues/7#issuecomment-5726512293
+permissions: {}
 
 env:
   DATABASE_URL: postgres://pocketboard:pocketboard@127.0.0.1:5432/pocketboard
@@ -18,6 +19,8 @@ env:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     services:
       postgres:
@@ -36,10 +39,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
           cache: "npm"
@@ -73,8 +78,192 @@ jobs:
 
       - name: Upload Playwright report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: playwright-report
           path: playwright-report/
           retention-days: 7
+
+  openapi-drift:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Regenerate OpenAPI document and fail on drift
+        run: npm run openapi:check
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Test the scan wrapper
+        run: bash scripts/release/scan-secrets.test.sh
+
+      - name: Scan full history for secrets
+        run: bash scripts/release/scan-secrets.sh .
+
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: never
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, actions]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+
+      # Results are not uploaded (no security-events permission); any result
+      # fails the job instead, so an alert cannot be dismissed into a pass.
+      - name: Analyse
+        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          category: /language:${{ matrix.language }}
+          upload: never
+          output: ${{ runner.temp }}/codeql
+
+      - name: Fail on any CodeQL result
+        env:
+          SARIF_DIR: ${{ runner.temp }}/codeql
+        run: node scripts/release/fail-on-sarif-results.mjs "$SARIF_DIR"
+
+  images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Test release scripts
+        run: |
+          bash scripts/release/require-unpublished-tag.test.sh
+          bash scripts/release/check-production-compose.test.sh
+          bash scripts/release/push-and-record.test.sh
+          node --test "scripts/release/*.test.mjs"
+
+      - name: Check production Compose invariants
+        run: bash scripts/release/check-production-compose.sh compose.production.yml
+
+      - name: Build images
+        run: |
+          bash scripts/release/build-image.sh api "pocketboard-api:${GITHUB_SHA}"
+          bash scripts/release/build-image.sh web "pocketboard-web:${GITHUB_SHA}"
+
+      - name: Scan images
+        run: |
+          bash scripts/release/scan-image.sh "pocketboard-api:${GITHUB_SHA}"
+          bash scripts/release/scan-image.sh "pocketboard-web:${GITHUB_SHA}"
+
+      - name: Smoke-test production Compose with the built images
+        run: bash scripts/release/smoke-production-compose.sh "pocketboard-api:${GITHUB_SHA}" "pocketboard-web:${GITHUB_SHA}"
+
+  publish:
+    # Only commits that reached main (through an owner-merged pull request)
+    # publish. Pull requests, including forks, never reach this job.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build-and-test, openapi-drift, secret-scan, codeql, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: release-${{ github.sha }}
+      cancel-in-progress: false
+    env:
+      API_IMAGE: ghcr.io/malbr/pocketboard-api:${{ github.sha }}
+      WEB_IMAGE: ghcr.io/malbr/pocketboard-web:${{ github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to overwrite an existing release tag
+        run: |
+          bash scripts/release/require-unpublished-tag.sh "$API_IMAGE"
+          bash scripts/release/require-unpublished-tag.sh "$WEB_IMAGE"
+
+      - name: Build images
+        run: |
+          bash scripts/release/build-image.sh api "$API_IMAGE"
+          bash scripts/release/build-image.sh web "$WEB_IMAGE"
+
+      # The exact image about to be pushed is scanned again, not a sibling build.
+      - name: Scan images
+        run: |
+          bash scripts/release/scan-image.sh "$API_IMAGE"
+          bash scripts/release/scan-image.sh "$WEB_IMAGE"
+
+      - name: Push images and record the release
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: bash scripts/release/push-and-record.sh "$API_IMAGE" "$WEB_IMAGE" > release-record.md
+
+      - name: Publish release record to the job summary
+        run: cat release-record.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the release record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-record-${{ github.sha }}
+          path: release-record.md
+          retention-days: 90
