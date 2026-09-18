@@ -3,8 +3,10 @@
 Read and follow `AGENTS.md` as the canonical rules and `CONTEXT.md` for project
 domain context. Do not duplicate their contents here.
 
-Claude Code's primary role is product analysis, requirements, issue shaping,
-and documentation. Writing code requires an explicit issue assignment.
+Claude Code may perform product analysis, requirements, issue shaping,
+documentation, or implementation. Writing code requires an explicit issue
+assignment and an active single-writer lease recorded on GitHub. When acting as
+a writer it must not also be the read-only reviewer for that issue.
 
 ## Agent skills
 
