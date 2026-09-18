@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# Root deploy script (issue #8, ADR 0006). Installed root-owned at
+# /usr/local/sbin/pocketboard-deploy and run only by the systemd unit
+# pocketboard-deploy@<request>.service, whose instance name is the request:
+#
+#   deploy-<sha>-<api digest hex>-<web digest hex>
+#       fetch compose for <sha>, pull and verify both images, back up,
+#       migrate once, start, check health, record
+#   rollback-<sha>
+#       restart a release that previously deployed successfully, using its
+#       stored compose file and digests; never backs up, migrates, or
+#       touches the database
+#   status
+#       report the running release; changes nothing
+#
+# The SSH gate already validated the request; it is validated again here so
+# this script never depends on its caller. Every failure stops the sequence
+# and is recorded. Nothing rolls back automatically: a rollback is a separate,
+# human-approved request.
+set -euo pipefail
+umask 022
+
+readonly repo="malbr/pocketboard"
+readonly registry="ghcr.io/malbr"
+state="${POCKETBOARD_STATE_DIR:-/var/lib/pocketboard}"
+secrets="${POCKETBOARD_SECRETS_DIR:-/etc/pocketboard/secrets}"
+backup="${POCKETBOARD_BACKUP:-/usr/local/sbin/pocketboard-backup}"
+health_attempts="${POCKETBOARD_HEALTH_ATTEMPTS:-24}"
+health_delay="${POCKETBOARD_HEALTH_DELAY:-5}"
+web_port="${WEB_PORT:-8080}"
+ledger="$state/releases.log"
+
+log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
+die() { log "FAILED: $*" >&2; exit 1; }
+refuse() { echo "refused: $*" >&2; exit 2; }
+
+[[ $# -eq 1 ]] || refuse "expected exactly one request"
+request="$1"
+if [[ "$request" =~ ^deploy-([0-9a-f]{40})-([0-9a-f]{64})-([0-9a-f]{64})$ ]]; then
+  action=deploy sha="${BASH_REMATCH[1]}" api="sha256:${BASH_REMATCH[2]}" web="sha256:${BASH_REMATCH[3]}"
+elif [[ "$request" =~ ^rollback-([0-9a-f]{40})$ ]]; then
+  action=rollback sha="${BASH_REMATCH[1]}"
+elif [[ "$request" == status ]]; then
+  action=status
+else
+  refuse "unknown request"
+fi
+
+if [[ "$action" != status && ! "${PUBLIC_URL:-}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]]; then
+  refuse "PUBLIC_URL must be set to the https:// origin in /etc/pocketboard/deploy.env"
+fi
+
+mkdir -p "$state/releases"
+touch "$ledger"
+
+# Runs Compose against one stored release. The variables are exported so that
+# Compose's required ${...:?} interpolation sees them.
+compose() {
+  RELEASE_SHA="$sha" API_DIGEST="$api" WEB_DIGEST="$web" SECRETS_DIR="$secrets" WEB_PORT="$web_port" \
+    docker compose --project-name pocketboard --project-directory "$state/releases/$sha" \
+    -f "$state/releases/$sha/compose.production.yml" "$@"
+}
+
+image_ref() { echo "$registry/pocketboard-$1:$sha@$2"; }
+
+# Pulls when required (always for a new deploy, so the registry proves the
+# digest exists) and requires the image to carry its own commit as revision.
+ensure_image() {
+  local ref="$1" always_pull="$2" revision
+  if [[ "$always_pull" == yes ]] || ! docker image inspect --format '{{.Id}}' "$ref" > /dev/null 2>&1; then
+    docker pull --quiet "$ref" > /dev/null || die "could not pull $ref"
+  fi
+  revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$ref")"
+  [[ "$revision" == "$sha" ]] || die "$ref carries revision '$revision', expected $sha"
+  log "verified image $ref"
+}
+
+check_url() {
+  local url="$1" want="$2" attempt body
+  for ((attempt = 1; attempt <= health_attempts; attempt++)); do
+    if body="$(curl -fsS --max-time 5 "$url" 2> /dev/null)" && [[ "$body" == "$want" ]]; then
+      log "healthy: $url"
+      return 0
+    fi
+    sleep "$health_delay"
+  done
+  die "unhealthy after $health_attempts attempts: $url"
+}
+
+# Health through the loopback port and through the public TLS proxy, then
+# proof that the containers run exactly the requested images.
+verify_running() {
+  check_url "http://127.0.0.1:$web_port/healthz" "ok"
+  check_url "http://127.0.0.1:$web_port/api/health" '{"status":"ok"}'
+  check_url "$PUBLIC_URL/api/health" '{"status":"ok"}'
+  local service digest container running expected
+  for service in api web; do
+    [[ "$service" == api ]] && digest="$api" || digest="$web"
+    container="$(compose ps -q "$service")"
+    [[ -n "$container" ]] || die "no $service container is running"
+    running="$(docker inspect --format '{{.Image}}' "$container")"
+    expected="$(docker image inspect --format '{{.Id}}' "$(image_ref "$service" "$digest")")"
+    [[ "$running" == "$expected" ]] || die "$service is running image $running, expected $expected"
+  done
+}
+
+record() {
+  printf '%s %s %s %s %s %s\n' "$(date -u +%FT%TZ)" "$action" "$sha" "$api" "$web" "$1" >> "$ledger"
+}
+
+if [[ "$action" == status ]]; then
+  if [[ ! -s "$state/current" ]]; then
+    echo "no release recorded"
+    exit 0
+  fi
+  read -r sha api web < "$state/current"
+  echo "current: $sha $api $web"
+  echo "recent ledger entries:"
+  tail -n 5 "$ledger"
+  compose ps --format 'table {{.Service}}\t{{.Status}}' || echo "compose ps failed"
+  exit 0
+fi
+
+exec 9> "$state/deploy.lock"
+flock -n 9 || die "another deploy or rollback is running"
+
+if [[ "$action" == rollback ]]; then
+  # Only a release that once passed every check may come back, with exactly
+  # the digests and compose file recorded then.
+  previous="$(awk -v s="$sha" '$3 == s && $6 == "ok" { line = $4 " " $5 } END { print line }' "$ledger")"
+  [[ -n "$previous" ]] || die "no successful deploy of $sha is recorded; refusing to roll back to it"
+  read -r api web <<< "$previous"
+  [[ -s "$state/releases/$sha/compose.production.yml" ]] || die "stored compose file for $sha is missing"
+else
+  known="$(awk -v s="$sha" '$3 == s && $6 == "ok" { print $4 " " $5 }' "$ledger" | sort -u)"
+  if [[ -n "$known" && "$known" != "$api $web" ]]; then
+    die "$sha was deployed before with different digests ($known); refusing"
+  fi
+fi
+
+# From here on, any exit that is not a success is recorded as a failed
+# attempt. The previous `current` release is left as it was.
+completed=no
+trap '[[ $completed == yes ]] || record failed' EXIT
+log "$action $sha (api $api, web $web)"
+
+if [[ "$action" == deploy ]]; then
+  release="$state/releases/$sha"
+  mkdir -p "$release"
+  if [[ ! -s "$release/compose.production.yml" ]]; then
+    # A commit SHA addresses immutable content, so the file is fetched once.
+    curl -fsSL --proto '=https' --max-time 30 -o "$release/compose.production.yml.tmp" \
+      "https://raw.githubusercontent.com/$repo/$sha/compose.production.yml" \
+      || die "could not fetch compose.production.yml for $sha"
+    mv "$release/compose.production.yml.tmp" "$release/compose.production.yml"
+  fi
+  compose config --quiet || die "compose.production.yml for $sha does not resolve"
+  ensure_image "$(image_ref api "$api")" yes
+  ensure_image "$(image_ref web "$web")" yes
+
+  # The database must be up to be dumped; on a first deploy this creates it.
+  compose up -d --wait --wait-timeout 120 postgres || die "postgres did not become healthy"
+  "$backup" "$sha" || die "backup was not verified; migrations were not run"
+  log "running migrations"
+  compose --profile migrate run --rm migrate || die "migrations failed; the new release was not started"
+else
+  ensure_image "$(image_ref api "$api")" no
+  ensure_image "$(image_ref web "$web")" no
+fi
+
+compose up -d --wait --wait-timeout 180 --remove-orphans || die "services did not become healthy"
+verify_running
+
+record ok
+printf '%s %s %s\n' "$sha" "$api" "$web" > "$state/current.tmp"
+mv "$state/current.tmp" "$state/current"
+completed=yes
+log "running $sha (api $api, web $web)"

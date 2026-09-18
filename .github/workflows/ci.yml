@@ -183,12 +183,20 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Test release scripts
+      - name: Test release and VPS deploy scripts
         run: |
           bash scripts/release/require-unpublished-tag.test.sh
           bash scripts/release/check-production-compose.test.sh
           bash scripts/release/push-and-record.test.sh
           node --test "scripts/release/*.test.mjs"
+          bash deploy/vps/tests/ssh-gate.test.sh
+          bash deploy/vps/tests/pocketboard-deploy.test.sh
+          bash deploy/vps/tests/pocketboard-backup.test.sh
+
+      # Production rolls back the image, never the database, so every
+      # migration must stay compatible with the previous image (issue #8).
+      - name: Check migrations are backward compatible
+        run: node scripts/release/check-migrations.mjs packages/api/migrations
 
       - name: Check production Compose invariants
         run: bash scripts/release/check-production-compose.sh compose.production.yml

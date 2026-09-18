@@ -35,7 +35,10 @@ the initial POC.
 ## Production operations
 
 - Deployment uses a forced-command SSH account and one root-owned allow-listed
-  script. The account is not a member of the Docker group.
+  script. The account is not a member of the Docker group and has no sudo; it
+  reaches root only by starting one polkit-allowed systemd unit (ADR 0006).
+- Rollback restarts an earlier application image and never changes the
+  database, so CI rejects destructive or rollback-incompatible migrations.
 - GitHub Environment stores only the restricted deployment key. Application and
   backup secrets stay in root-owned VPS files.
 - PostgreSQL runs in a dedicated private container with persistent storage.

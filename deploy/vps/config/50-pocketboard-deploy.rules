@@ -1,0 +1,13 @@
+// Install as /etc/polkit-1/rules.d/50-pocketboard-deploy.rules (root:root 0644).
+// The pocketboard-deploy account may start pocketboard-deploy@<request>.service
+// and nothing else: no stop, restart, enable, or any other unit. It has no
+// sudo and is not in the docker group, so this is its only route to root.
+polkit.addRule(function (action, subject) {
+  if (action.id === "org.freedesktop.systemd1.manage-units" &&
+      subject.user === "pocketboard-deploy" &&
+      action.lookup("verb") === "start" &&
+      /^pocketboard-deploy@(status|rollback-[0-9a-f]{40}|deploy-[0-9a-f]{40}-[0-9a-f]{64}-[0-9a-f]{64})\.service$/
+        .test(action.lookup("unit"))) {
+    return polkit.Result.YES;
+  }
+});

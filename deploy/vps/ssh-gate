@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Forced command for the `pocketboard-deploy` SSH account (issue #8). Installed
+# root-owned at /usr/local/lib/pocketboard/ssh-gate and named by both the
+# sshd `ForceCommand` and the key's `command=` option, so it is the only thing
+# the account can run.
+#
+# It accepts exactly three requests and nothing else:
+#   deploy <sha> sha256:<api digest> sha256:<web digest>
+#   rollback <sha>
+#   status
+# A valid request becomes one systemd instance name. polkit lets this account
+# `start` only pocketboard-deploy@*.service, and the root script behind that
+# unit validates the name again, so this gate is not the only check.
+set -euo pipefail
+
+log_dir="${POCKETBOARD_GATE_LOG_DIR:-/var/log/pocketboard-deploy}"
+request="${SSH_ORIGINAL_COMMAND:-}"
+
+# One anchored pattern per request over the whole string. Bash anchors ^ and $
+# to the string, not to lines, so an embedded newline cannot smuggle a second
+# command past the match.
+if [[ "$request" =~ ^deploy\ ([0-9a-f]{40})\ sha256:([0-9a-f]{64})\ sha256:([0-9a-f]{64})$ ]]; then
+  instance="deploy-${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+elif [[ "$request" =~ ^rollback\ ([0-9a-f]{40})$ ]]; then
+  instance="rollback-${BASH_REMATCH[1]}"
+elif [[ "$request" == status ]]; then
+  instance="status"
+else
+  echo "refused: allowed requests are 'deploy <sha> sha256:<api> sha256:<web>', 'rollback <sha>', and 'status'" >&2
+  exit 2
+fi
+
+started="$(date +%s)"
+code=0
+# A oneshot unit blocks `start` until it finishes and returns its result.
+systemctl --no-ask-password start "pocketboard-deploy@${instance}.service" || code=$?
+
+# The unit writes its own log. A log older than this request belongs to an
+# earlier run (for example when polkit refused the start) and must not be
+# reported as this run's result.
+log="$log_dir/$instance.log"
+if [[ -f "$log" ]] && (( $(stat -c %Y "$log") >= started )); then
+  cat "$log"
+else
+  echo "no log from this run: the unit did not start (systemctl exit $code)" >&2
+fi
+exit "$code"

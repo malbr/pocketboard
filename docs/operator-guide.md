@@ -14,7 +14,7 @@ requirements, approvals, code review evidence, or release history live.
 | --- | --- | --- |
 | Local web app | `http://127.0.0.1:5173` | Available while `npm run dev` is running |
 | Local API health | `http://127.0.0.1:3000/health` | Available while the API is running |
-| Production VPS | Not assigned yet | Not deployed; issues #7, #8, and #9 cover build, deployment, and operational proof |
+| Production VPS | `https://<name>.dedyn.io` (not yet assigned) | Not deployed. The deploy path is in [production deployment](deployment.md); host installation and the first deploy each need their own approval on #8 |
 | Release images | `ghcr.io/malbr/pocketboard-{api,web}:<commit SHA>` | Published by CI for each commit on `main`; never deployed automatically. See [release artifacts](release.md) |
 
 `main` contains owner-only GitHub authentication (PR #11, merged 2026-09-17), so
@@ -188,8 +188,10 @@ history as durable documentation.
   dependency audit, and Chromium end-to-end coverage.
 - **Security:** never accept automatic security exceptions or dependency
   merges. Review the affected runtime, exploitability, and upgrade risk.
-- **Deployments:** none exist yet. Later, production must require a GitHub
-  Environment approval and deploy an exact commit-SHA image.
+- **Deployments:** the **Deploy** workflow runs only when dispatched from
+  `main` and waits for your approval on the `production` Environment. Approve
+  it only for the SHA named in an approved issue gate. Its log shows the
+  backup, migration, health, and running SHA.
 - **Production health:** after deployment, monitor the public `/health` URL in
   the existing Uptime Kuma and verify encrypted off-VPS backups separately.
 
