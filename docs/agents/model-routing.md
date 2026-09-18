@@ -40,6 +40,23 @@ against PocketBoard before promotion:
 Do not use experimental routes for mergeable auth, authorization, migrations,
 security controls, release, deployment, or incident work.
 
+## Current conformance state
+
+The 2026-09-18 minimal live check used one no-tool, no-session request per
+reachable route with `--thinking max`. It was a transport check, not a coding
+quality benchmark:
+
+| Route | Result | Evidence and restriction |
+| --- | --- | --- |
+| Tencent TokenHub `kimi-k3` | Pass | Correct marker, reasoning stream present, 1,687 reported tokens, 4.4 seconds |
+| OpenAgentic `glm-5.3-flash` | Pass | Correct marker, 73 reasoning tokens, 2,195 total tokens, 4.0 seconds |
+| OpenAgentic `deepseek-v4.1-flash-free` | Partial | Correct marker, but zero reasoning tokens and 53.5-second latency; `max` upstream behavior is not proven |
+| KiosAPI reasoning routes | Blocked | `router.kiosapi.com` had no DNS record locally or through public resolvers; no inference occurred |
+
+Do not assign a KiosAPI writer until its documented endpoint resolves and a
+fresh conformance check passes. Do not promote the OpenAgentic DeepSeek route
+until a bounded reasoning test confirms that its gateway honors `max`.
+
 ## Selection protocol
 
 Before starting, record on the issue:
@@ -68,6 +85,10 @@ latency, so Pi remains issue-scoped with bounded attempts. Provider definitions
 still do not expose reliable cost metadata. Record cost as unknown rather than
 zero, and verify identity, tool calls, reasoning behavior, latency, quota, and
 usage before a route can win the project bake-off.
+
+Global Pi settings allow at most one automatic retry after the initial request;
+provider-SDK retries remain disabled. A failed retry ends the run and requires
+a recorded human or Orca decision before another session starts.
 
 ## Pi launch
 
