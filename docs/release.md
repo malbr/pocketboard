@@ -52,7 +52,7 @@ else. Every other job has `contents: read` only.
 
 | Check | Tool | Fails on |
 | --- | --- | --- |
-| Production dependencies | `npm audit --omit=dev --audit-level=high` | any high or critical advisory |
+| Dependencies (incl. dev) | `npm audit --audit-level=high` | any high or critical advisory |
 | Dependency changes in a PR | `actions/dependency-review-action` | a new high or critical advisory |
 | Secrets in history | gitleaks (digest-pinned), via `scan-secrets.sh` | any finding, or fewer commits scanned than exist |
 | Static analysis | CodeQL `security-extended`, JavaScript/TypeScript and Actions | any result, of any severity |
@@ -64,11 +64,15 @@ No check has an ignore file, baseline, or allowlist. An exception needs a
 separate security-exception approval on GitHub. No workflow can merge,
 approve, or dismiss anything.
 
-Known gap: the full `npm audit`, including dev dependencies, reports a high
-advisory in `vite` and a critical one in `vitest`. Both are dev-server and
-test-runner tooling that never ships in an image, and both are fixed only by
-major upgrades. They are recorded in the issue #7 handoff and need a separate,
-approved dependency-update issue. They are not suppressed.
+Known gap: `npm audit`, including dev dependencies, reports one moderate
+advisory (GHSA-67mh-4wv8-2f99, an esbuild dev-server request/response
+disclosure) nested under `drizzle-kit`'s deprecated `@esbuild-kit/*` loader
+chain. It never ships in an image, and `drizzle-kit`'s latest release has no
+newer dependency chain to move to; the only fix is an unreleased `1.0.0`
+pre-release. It is below `--audit-level=high` so it does not fail CI, and it
+is not suppressed. Closing it needs either a separate security-exception
+approval to accept it, or a follow-up issue once `drizzle-kit` 1.0 reaches a
+stable release (issue #28).
 
 ## API contract
 

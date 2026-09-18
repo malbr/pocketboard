@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
@@ -20,5 +20,9 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./test/setup.ts"],
     globals: true,
+    // Vitest 5 narrowed its default `exclude` to just node_modules/.git,
+    // dropping the old **/dist/** entry. Without this, a leftover local
+    // `vite build` output under `dist/` gets picked up and run as tests.
+    exclude: [...configDefaults.exclude, "**/dist/**"],
   },
 });

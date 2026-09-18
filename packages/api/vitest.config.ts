@@ -1,7 +1,11 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    // Vitest 5 narrowed its default `exclude` to just node_modules/.git,
+    // dropping the old **/dist/** entry. Without this, a leftover local
+    // `npm run build` output under `dist/` gets picked up and run as tests.
+    exclude: [...configDefaults.exclude, "**/dist/**"],
     /**
      * API test files run one at a time.
      *
