@@ -86,6 +86,10 @@ still do not expose reliable cost metadata. Record cost as unknown rather than
 zero, and verify identity, tool calls, reasoning behavior, latency, quota, and
 usage before a route can win the project bake-off.
 
+Global Pi settings allow at most one automatic retry after the initial request;
+provider-SDK retries remain disabled. A failed retry ends the run and requires
+a recorded human or Orca decision before another session starts.
+
 ## Pi launch
 
 From a dedicated issue worktree:
