@@ -60,6 +60,21 @@ describe("OpenAPI contract", () => {
     );
   });
 
+  it("documents the rate-limit 429 on every limited route and never on /health", () => {
+    const document = generateOpenApiDocument();
+    for (const [path, item] of Object.entries(document.paths)) {
+      for (const [method, operation] of Object.entries(item ?? {})) {
+        const responses = (operation as { responses: Record<string, unknown> }).responses;
+        if (path === "/health") {
+          expect(responses, `${method} ${path}`).not.toHaveProperty("429");
+        } else {
+          expect(responses, `${method} ${path}`).toHaveProperty("429");
+        }
+      }
+    }
+    expect(Object.keys(document.components?.schemas ?? {})).toContain("RateLimited");
+  });
+
   it("uses OpenAPI path templates for path parameters", () => {
     const document = generateOpenApiDocument();
     expect(Object.keys(document.paths)).toContain("/cards/{cardId}");

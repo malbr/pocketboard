@@ -17,6 +17,7 @@ import {
   deleteCardInputSchema,
   internalErrorSchema,
   moveCardInputSchema,
+  rateLimitedSchema,
   sessionSchema,
 } from "@pocketboard/shared";
 
@@ -67,12 +68,22 @@ function buildRegistry(): OpenAPIRegistry {
   const CardNotFound = registry.register("CardNotFound", cardNotFoundSchema);
   const CardVersionConflict = registry.register("CardVersionConflict", cardVersionConflictSchema);
   const Health = registry.register("Health", healthSchema);
+  const RateLimited = registry.register("RateLimited", rateLimitedSchema);
 
   const json = (schema: z.ZodTypeAny, description: string) => ({
     description,
     content: { "application/json": { schema } },
   });
   const internal = { 500: json(InternalError, "Unexpected failure; no internal detail is returned") };
+  // Every route except /health is rate-limited; see src/rate-limit.ts.
+  const limited = {
+    429: {
+      ...json(RateLimited, "Too many requests from this client"),
+      headers: {
+        "Retry-After": { description: "Seconds until the budget resets", schema: { type: "integer" as const } },
+      },
+    },
+  };
   const ownerOnly = {
     401: json(AuthError, "Not signed in"),
     403: json(AuthError, "Signed in as someone other than the owner, or CSRF token invalid"),
@@ -83,6 +94,7 @@ function buildRegistry(): OpenAPIRegistry {
     ...ownerOnly,
     404: json(CardNotFound, "No such card"),
     409: json(CardVersionConflict, "Stale version; the current card is returned"),
+    ...limited,
     ...internal,
   });
 
@@ -97,7 +109,11 @@ function buildRegistry(): OpenAPIRegistry {
       method: "get",
       path: "/auth/github",
       summary: "Start GitHub sign-in",
-      responses: { 302: { description: "Redirect to GitHub authorization" }, ...internal },
+      responses: {
+        302: { description: "Redirect to GitHub authorization" },
+        ...limited,
+        ...internal,
+      },
     },
     {
       method: "get",
@@ -108,6 +124,7 @@ function buildRegistry(): OpenAPIRegistry {
         400: json(AuthError, "OAuth state did not match"),
         403: json(AuthError, "The GitHub account is not the owner"),
         502: json(AuthError, "GitHub code exchange failed"),
+        ...limited,
         ...internal,
       },
     },
@@ -116,7 +133,12 @@ function buildRegistry(): OpenAPIRegistry {
       path: "/auth/session",
       summary: "Current owner session and CSRF token",
       security: owner,
-      responses: { 200: json(Session, "Signed in as the owner"), ...ownerOnly, ...internal },
+      responses: {
+        200: json(Session, "Signed in as the owner"),
+        ...ownerOnly,
+        ...limited,
+        ...internal,
+      },
     },
     {
       method: "post",
@@ -124,14 +146,24 @@ function buildRegistry(): OpenAPIRegistry {
       summary: "Sign out",
       security: owner,
       request: { headers: csrfHeader },
-      responses: { 204: { description: "Session destroyed" }, ...ownerOnly, ...internal },
+      responses: {
+        204: { description: "Session destroyed" },
+        ...ownerOnly,
+        ...limited,
+        ...internal,
+      },
     },
     {
       method: "get",
       path: "/cards",
       summary: "List cards, newest first",
       security: owner,
-      responses: { 200: json(CardList, "All cards"), ...ownerOnly, ...internal },
+      responses: {
+        200: json(CardList, "All cards"),
+        ...ownerOnly,
+        ...limited,
+        ...internal,
+      },
     },
     {
       method: "post",
@@ -146,6 +178,7 @@ function buildRegistry(): OpenAPIRegistry {
         201: json(Card, "Created"),
         400: json(InvalidCardInput, "Invalid input"),
         ...ownerOnly,
+        ...limited,
         ...internal,
       },
     },

@@ -295,6 +295,21 @@
           "status"
         ],
         "additionalProperties": false
+      },
+      "RateLimited": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "enum": [
+              "rate_limited"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false
       }
     },
     "parameters": {}
@@ -334,6 +349,24 @@
           "302": {
             "description": "Redirect to GitHub authorization"
           },
+          "429": {
+            "description": "Too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the budget resets",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimited"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Unexpected failure; no internal detail is returned",
             "content": {
@@ -370,6 +403,24 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AuthError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the budget resets",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimited"
                 }
               }
             }
@@ -436,6 +487,24 @@
               }
             }
           },
+          "429": {
+            "description": "Too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the budget resets",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimited"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Unexpected failure; no internal detail is returned",
             "content": {
@@ -492,6 +561,24 @@
               }
             }
           },
+          "429": {
+            "description": "Too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the budget resets",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimited"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Unexpected failure; no internal detail is returned",
             "content": {
@@ -540,6 +627,24 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AuthError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the budget resets",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimited"
                 }
               }
             }
@@ -632,6 +737,24 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AuthError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the budget resets",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimited"
                 }
               }
             }
@@ -768,6 +891,24 @@
               }
             }
           },
+          "429": {
+            "description": "Too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the budget resets",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimited"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Unexpected failure; no internal detail is returned",
             "content": {
@@ -885,6 +1026,24 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CardVersionConflict"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the budget resets",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateLimited"
                 }
               }
             }
