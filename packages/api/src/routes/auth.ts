@@ -4,6 +4,7 @@ import type { AuthConfig } from "../config/auth-config";
 import { OAuthFailure, type GitHubIdentityProvider } from "../auth/github-identity-provider";
 import { SESSION_OWNER_KEY } from "../auth/require-owner";
 import "../auth/session-augmentation";
+import { authRouteRateLimit } from "../rate-limit";
 
 export interface AuthRouteDependencies {
   config: AuthConfig;
@@ -19,11 +20,11 @@ function sessionExpiresAt(request: FastifyRequest, ttlMs: number): string {
 export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDependencies): void {
   const { config, provider, requireOwner } = deps;
 
-  app.get("/auth/github", async (request, reply) => {
+  app.get("/auth/github", { config: authRouteRateLimit }, async (request, reply) => {
     await provider.startAuthorization(request, reply);
   });
 
-  app.get("/auth/github/callback", async (request, reply) => {
+  app.get("/auth/github/callback", { config: authRouteRateLimit }, async (request, reply) => {
     let githubUserId: number;
     try {
       githubUserId = await provider.completeAuthorization(request, reply);

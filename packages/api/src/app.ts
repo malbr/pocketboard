@@ -9,6 +9,7 @@ import { PostgresSessionStore } from "./auth/session-store";
 import type { AuthConfig } from "./config/auth-config";
 import type { Database } from "./db/client";
 import { registerErrorHandler } from "./errors";
+import { registerRateLimit } from "./rate-limit";
 import { registerAuthRoutes } from "./routes/auth";
 import { registerCardRoutes } from "./routes/cards";
 import { registerHealthRoutes } from "./routes/health";
@@ -45,6 +46,8 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
   });
 
   registerErrorHandler(app);
+  // Before the session plugin and all routes; see registerRateLimit.
+  await registerRateLimit(app);
 
   const sessionStore = new PostgresSessionStore(db, authConfig.sessionTtlMs, now);
 

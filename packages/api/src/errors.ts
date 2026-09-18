@@ -1,5 +1,6 @@
 import { ApiErrorCode, AuthErrorCode } from "@pocketboard/shared";
 import type { FastifyError, FastifyInstance } from "fastify";
+import { RateLimitedError } from "./rate-limit";
 
 /**
  * The typed errors `@fastify/csrf-protection` throws. Left to Fastify's default
@@ -53,6 +54,11 @@ export function registerErrorHandler(app: FastifyInstance): void {
   app.setErrorHandler((error: FastifyError, request, reply) => {
     if (error.code && CSRF_ERROR_CODES.has(error.code)) {
       return reply.status(403).send({ error: AuthErrorCode.CsrfTokenInvalid });
+    }
+
+    if (error instanceof RateLimitedError) {
+      // Retry-After is already set by the limiter; the body stays opaque.
+      return reply.status(429).send({ error: ApiErrorCode.RateLimited });
     }
 
     const statusCode = error.statusCode ?? 500;
