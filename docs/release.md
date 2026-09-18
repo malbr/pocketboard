@@ -65,15 +65,16 @@ No check has an ignore file, baseline, or allowlist. An exception needs a
 separate security-exception approval on GitHub. No workflow can merge,
 approve, or dismiss anything.
 
-Known gap: `npm audit`, including dev dependencies, reports one moderate
+Accepted risk: `npm audit`, including dev dependencies, reports one moderate
 advisory (GHSA-67mh-4wv8-2f99, an esbuild dev-server request/response
 disclosure) nested under `drizzle-kit`'s deprecated `@esbuild-kit/*` loader
 chain. It never ships in an image, and `drizzle-kit`'s latest release has no
 newer dependency chain to move to; the only fix is an unreleased `1.0.0`
-pre-release. It is below `--audit-level=high` so it does not fail CI, and it
-is not suppressed. Closing it needs either a separate security-exception
-approval to accept it, or a follow-up issue once `drizzle-kit` 1.0 reaches a
-stable release (issue #28).
+pre-release. It is below `--audit-level=high` so it does not fail CI. The
+owner accepted this as a permanent-until-superseded risk exception rather
+than suppressing it — security-exception gate `issue-31-security-exception-esbuild-kit`,
+approved on [issue #31](https://github.com/malbr/pocketboard/issues/31#issuecomment-5733225289).
+Revisit once `drizzle-kit` ships a stable `1.0.0` that drops `@esbuild-kit/*`.
 
 ## API contract
 
