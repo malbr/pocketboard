@@ -21,5 +21,5 @@ export type {
 } from "./card";
 export { AuthErrorCode, authErrorSchema, sessionSchema } from "./auth";
 export type { AuthError, Session } from "./auth";
-export { ApiErrorCode, internalErrorSchema } from "./error";
-export type { InternalError } from "./error";
+export { ApiErrorCode, internalErrorSchema, rateLimitedSchema } from "./error";
+export type { InternalError, RateLimited } from "./error";

@@ -51,6 +51,19 @@ Only the listed peers' `X-Forwarded-*` headers are believed. Blanket values —
 `true`, `*`, a hop count, a hostname, any `/0` network — are rejected at
 startup.
 
+### Rate limits
+
+Each client gets 10 requests a minute on `/auth/github` and
+`/auth/github/callback`, and 300 a minute on every other route. `/health` is
+never limited. A client over budget receives `429` with
+`{"error":"rate_limited"}` and a `Retry-After` header. The values live in
+`packages/api/src/rate-limit.ts`, and counters are in memory, so they reset
+when the API restarts.
+
+The client is identified by the address Fastify resolves, so the limits rely on
+`TRUSTED_PROXY_IPS`. If it does not name the proxy in front of the API, every
+visitor appears as the proxy and shares one budget.
+
 Start everything with one command:
 
 ```sh
