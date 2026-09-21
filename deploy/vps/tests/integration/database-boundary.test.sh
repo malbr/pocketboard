@@ -105,6 +105,19 @@ compose a up -d --wait --wait-timeout 180 --remove-orphans > /dev/null 2>&1
 check "counterexample: the old rollback command recreated and downgraded the database" \
   '[[ "$(pg_id)" != "$b_db" && "$(sql "SHOW max_connections")" == 40 ]]'
 
+# PR #33 re-review finding 5, the Docker behaviour pocketboard-deploy's
+# database discovery relies on. A volume restored by hand has the Compose name
+# but no labels: a label filter misses it and only the name finds it. A lookup
+# Docker cannot answer fails, rather than returning an empty list.
+restored="${project}_restored-postgres"
+docker volume create "$restored" > /dev/null
+check "a label filter misses a hand-made volume with the Compose name" \
+  '[[ -z "$(docker volume ls --quiet --filter "label=com.docker.compose.project=$project" --filter label=com.docker.compose.volume=restored-postgres)" ]]'
+check "listing volumes by name finds it" 'docker volume ls --quiet | grep -Fxq "$restored"'
+docker volume rm "$restored" > /dev/null
+check "a Docker lookup that cannot reach the daemon fails" \
+  '! docker --host unix:///nonexistent/docker.sock ps --quiet > /dev/null 2>&1'
+
 if (( failures > 0 )); then
   echo "$failures case(s) failed"
   exit 1

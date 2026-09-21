@@ -13,7 +13,9 @@
 #     real run (finding 8)
 #   - an unauthorized deploy is refused before any state is written (finding 2)
 #   - Restic retention over many real snapshots, and restoring the newest one
-#     into a clean database (findings 5 and 6)
+#     with pocketboard-restore (findings 5 and 6; PR #33 re-review finding 3)
+#   - concurrent SSH requests each get their own run's log (PR #33 re-review
+#     finding 7)
 #
 # It creates a user, rewrites sshd and polkit configuration, and stops Docker,
 # so it refuses to run unless POCKETBOARD_DISPOSABLE_HOST=yes. Run it through
@@ -47,7 +49,8 @@ install -d -o root -g root -m 0700 /var/lib/pocketboard/docker \
   /var/lib/pocketboard/backup-tmp /var/cache/pocketboard-restic
 install -d -o root -g root -m 0750 /etc/pocketboard/secrets
 install -o root -g root -m 0755 deploy/vps/ssh-gate /usr/local/lib/pocketboard/ssh-gate
-install -o root -g root -m 0700 deploy/vps/pocketboard-deploy deploy/vps/pocketboard-backup /usr/local/sbin/
+install -o root -g root -m 0700 deploy/vps/pocketboard-deploy deploy/vps/pocketboard-backup \
+  deploy/vps/pocketboard-restore /usr/local/sbin/
 install -o root -g root -m 0644 deploy/vps/config/pocketboard-deploy@.service /etc/systemd/system/
 install -o root -g root -m 0644 deploy/vps/config/50-pocketboard-deploy.rules /etc/polkit-1/rules.d/
 install -o root -g root -m 0644 deploy/vps/config/60-pocketboard-deploy.conf /etc/ssh/sshd_config.d/
@@ -163,6 +166,16 @@ check "a start refused by polkit reports no log, not the previous run's" \
 mv /root/50-pocketboard-deploy.rules.off /etc/polkit-1/rules.d/50-pocketboard-deploy.rules
 for _ in $(seq 20); do deploy_ssh status > /dev/null 2>&1 && break; sleep 0.5; done
 
+# PR #33 re-review finding 7: concurrent requests for the same unit share one
+# log file. Each caller must get the log of the run it started.
+for n in 1 2 3 4; do deploy_ssh status > "/tmp/concurrent-$n.out" 2>&1 & done
+wait
+# sshd's "Could not chdir to home directory" notice comes first on stderr.
+ids="$(for n in 1 2 3 4; do grep -m 1 -E '^invocation [0-9a-f]{32}$' "/tmp/concurrent-$n.out"; done | sort -u | wc -l)"
+code="" output="$(cat /tmp/concurrent-*.out)"
+check "four concurrent status requests get four different runs' logs" '[[ $ids == 4 ]]'
+rm -f /tmp/concurrent-*.out
+
 # --- Findings 5 and 6: Restic retention and restore -------------------------
 # A local file repository and a real PostgreSQL container carrying the
 # production Compose labels, so pocketboard-backup finds it as it would on
@@ -201,7 +214,10 @@ EOF
 docker compose -f "$compose_dir/compose.yml" up -d --wait --wait-timeout 120 > /dev/null 2>&1
 pg="$(docker compose -f "$compose_dir/compose.yml" ps -q postgres)"
 psql_in() { docker exec -i "$pg" psql -h 127.0.0.1 -U pocketboard -v ON_ERROR_STOP=1 -qtA "$@"; }
-psql_in -d pocketboard -c "CREATE TABLE cards (title text); INSERT INTO cards VALUES ('one'), ('two');"
+psql_in -d pocketboard -c "CREATE TABLE cards (title text); INSERT INTO cards VALUES ('one'), ('two');
+  CREATE SCHEMA drizzle;
+  CREATE TABLE drizzle.__drizzle_migrations (id serial PRIMARY KEY, hash text NOT NULL, created_at bigint);
+  INSERT INTO drizzle.__drizzle_migrations (hash, created_at) VALUES ('disposable', 1726000000000);"
 
 # Sixty days of earlier pre-deploy snapshots, shaped exactly as
 # pocketboard-backup writes them now, then two real runs of the script.
@@ -237,18 +253,17 @@ old_restic forget --host pocketboard --tag pocketboard --keep-last 5 --keep-dail
 old_kept="$(old_restic snapshots --json | grep -o '"id"' | wc -l)"
 check "counterexample: per-run file names kept all $old_kept of $seeded snapshots" '(( old_kept == seeded ))'
 
-# Restore the newest snapshot the way docs/deployment.md describes.
+# Restore the newest snapshot with the script docs/deployment.md runs.
 psql_in -d pocketboard -c "INSERT INTO cards VALUES ('after the backup');"
-dump=/var/lib/pocketboard/backup-tmp/restore.dump
 latest="$(restic_env snapshots --json --host pocketboard --latest 1 | grep -oE '"short_id":"[0-9a-f]+' | cut -d'"' -f4)"
-restic_env dump "$latest" /pocketboard.dump > "$dump"
-docker exec -i "$pg" pg_restore --list < "$dump" > /dev/null
-psql_in -d postgres -c "CREATE DATABASE pocketboard_restore TEMPLATE template0;"
-docker exec -i "$pg" pg_restore -h 127.0.0.1 -U pocketboard -d pocketboard_restore --exit-on-error \
-  --single-transaction --no-owner < "$dump"
-check "the newest snapshot restores into a clean database with the backed-up rows" \
-  '[[ "$(psql_in -d pocketboard_restore -c "SELECT count(*) FROM cards")" == 2 ]]'
-rm -f "$dump"
+code=0
+output="$(/usr/local/sbin/pocketboard-restore "$latest" 2>&1)" || code=$?
+check "pocketboard-restore swaps in the newest snapshot with the backed-up rows" \
+  '[[ $code == 0 && $output == *"swapped"* && "$(psql_in -d pocketboard -c "SELECT count(*) FROM cards")" == 2 ]]'
+replaced="$(psql_in -d postgres -c "SELECT datname FROM pg_database WHERE datname LIKE 'pocketboard_before_restore_%'")"
+check "the replaced database is kept with the row added after the backup" \
+  '[[ "$(psql_in -d "$replaced" -c "SELECT count(*) FROM cards")" == 3 ]]'
+check "no restore dump is left behind" '[[ -z "$(find /var/lib/pocketboard/backup-tmp -type f)" ]]'
 
 docker compose -f "$compose_dir/compose.yml" down -v > /dev/null 2>&1
 

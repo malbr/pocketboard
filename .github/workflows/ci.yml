@@ -192,6 +192,7 @@ jobs:
           bash deploy/vps/tests/ssh-gate.test.sh
           bash deploy/vps/tests/pocketboard-deploy.test.sh
           bash deploy/vps/tests/pocketboard-backup.test.sh
+          bash deploy/vps/tests/pocketboard-restore.test.sh
 
       # Real Compose and PostgreSQL (the image pinned in compose.production.yml):
       # an application rollback leaves the database container alone, and the

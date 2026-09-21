@@ -19,16 +19,26 @@ cat > "$work/bin/systemctl" <<'FAKE'
 #!/usr/bin/env bash
 # Records its arguments; writes the unit's log unless told the unit never ran.
 # Like the real unit, every run starts its log with a fresh invocation id.
+# In race mode a second SSH request for the same unit arrives just as this
+# run finishes: its gate starts in the background, and this run returns only
+# after giving it time to start the unit and rewrite the shared log.
 printf '%s\n' "$*" >> "$FAKE_CALLS"
 unit="${@: -1}"
 instance="${unit#pocketboard-deploy@}"
 instance="${instance%.service}"
 if [[ "$FAKE_SYSTEMCTL" != denied ]]; then
   printf 'invocation %s\nlog line from %s, run %s\n' "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" \
-    "$instance" "$RANDOM" > "$POCKETBOARD_GATE_LOG_DIR/$instance.log"
+    "$instance" "${FAKE_RUN:-$RANDOM}" > "$POCKETBOARD_GATE_LOG_DIR/$instance.log"
 fi
 case "$FAKE_SYSTEMCTL" in
   ok) exit 0 ;;
+  race)
+    # A separate SSH session: it shares no file descriptors with this one.
+    ( FAKE_SYSTEMCTL=ok FAKE_RUN=second bash "$FAKE_GATE" > "$FAKE_SECOND_OUT" 2>&1
+      echo "exit $?" >> "$FAKE_SECOND_OUT"
+      touch "$FAKE_SECOND_OUT.done" ) < /dev/null > /dev/null 2>&1 &
+    sleep 1
+    exit 0 ;;
   *) exit 1 ;;
 esac
 FAKE
@@ -40,6 +50,7 @@ run() {
   code=0
   output="$(env -i PATH="$work/bin:/usr/bin:/bin" SSH_ORIGINAL_COMMAND="$1" \
     POCKETBOARD_GATE_LOG_DIR="$work/log" FAKE_CALLS="$work/calls" FAKE_SYSTEMCTL="$2" \
+    FAKE_RUN="${3:-}" FAKE_GATE="$gate" FAKE_SECOND_OUT="$work/second" \
     bash "$gate" 2>&1)" || code=$?
 }
 
@@ -84,6 +95,18 @@ previous="$output"
 run "rollback $sha" denied
 check "an immediate refused retry does not show the previous run's log" \
   '[[ $code == 1 && $output != *"log line from"* && $output == *"no log from this run"* && -n $previous ]]'
+
+# PR #33 re-review finding 7: a second request for the same unit could start
+# a new run, which truncates the shared log, after the first run finished but
+# before its gate read the log. The first caller then got the second run's
+# output with its own exit status.
+rm -f "$work/second" "$work/second.done"
+run "rollback $sha" race first
+for _ in $(seq 50); do [[ -e "$work/second.done" ]] && break; sleep 0.1; done
+second="$(cat "$work/second" 2> /dev/null || true)"
+check "concurrent requests each get their own run's log" \
+  '[[ $code == 0 && $output == *"run first"* && $output != *"run second"* &&
+     $second == *"run second"* && $second != *"run first"* && $second == *"exit 0"* ]]'
 
 echo "log line from something without an invocation id" > "$work/log/status.log"
 run "status" denied

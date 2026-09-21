@@ -36,14 +36,17 @@ found two design gaps:
   `/etc/pocketboard/authorized-requests`, a root-owned file that only the
   owner edits, as root on the VPS, after approving the GitHub gate. The line
   is `<expiry> <action> <sha> <api digest> <web digest>`. The expiry must be
-  in the future and at most 7 days away. A rollback's digests must equal
+  a real UTC time, in the future and at most 7 days away. A rollback's digests must equal
   those in the release's ledger line. Each line is consumed under the deploy
   lock before the first side effect, so it works once. `status` needs no
   authorization.
 - Nothing may change the database before a verified backup of the database
-  as it is. A running database is backed up first. Only a host with no
-  database volume gets a fresh database from the new release before its
-  backup. An existing but stopped database is refused.
+  as it is. A running database is backed up first. An existing but stopped
+  database is refused. Only a host with no database gets a fresh database from
+  the new release before its backup: no PostgreSQL container or volume with
+  the Compose labels, no volume with the Compose name, and no successful
+  release in the ledger. A Docker lookup that fails refuses the deploy rather
+  than counting as "no database".
 - Rollback restarts only `api` and `web` (`--no-deps`, no orphan removal). It
   never recreates, reconfigures or downgrades PostgreSQL.
 - `status` only reads, and the unit has no dependency on `docker.service`, so
@@ -51,8 +54,16 @@ found two design gaps:
 
 ## Consequences
 
-- A copied deploy key alone can no longer change production. An attacker
-  also needs root on the VPS, which already implies full control.
+- A copied deploy key alone cannot choose what production runs: any other
+  action, SHA or digest, and any second use of a line, still needs root on
+  the VPS, which already implies full control.
+- A copied key can still use a line the owner has added but that has not been
+  used yet. Between the owner adding the line and the approved workflow run,
+  the key holder can send that exact request over SSH first. It runs before,
+  and without, the Environment approval, consuming the line, so the approved
+  run is then refused as already used. The damage is limited to running the
+  approved action early. The owner narrows this window by adding the line
+  just before approving the Environment, with a short expiry.
 - Each deploy or rollback now needs one owner action as root on the VPS, in
   addition to the GitHub gate and the Environment approval. The owner already
   holds that access. Agents still hold none.

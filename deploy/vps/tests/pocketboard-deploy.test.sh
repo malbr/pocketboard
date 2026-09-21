@@ -24,14 +24,31 @@ mkdir -p "$work/bin"
 cat > "$work/bin/docker" <<'FAKE'
 #!/usr/bin/env bash
 # Every call is recorded. FAKE_MODE selects one failure at a time; FAKE_DB is
-# the database's state before the run: running, stopped, or absent.
+# the database's state before the run: running, stopped, absent, or
+# unlabelled (only a volume with the Compose name but no Compose labels, as
+# after a manual restore).
 args="$*"
 printf 'docker %s\n' "$args" >> "$FAKE_CALLS"
 ref="${@: -1}"
 case "$1" in
   pull) [[ "$FAKE_MODE" == pull-fails ]] && exit 1; exit 0 ;;
-  ps) [[ "$FAKE_DB" == running ]] && echo "pgcid"; exit 0 ;;
-  volume) [[ "$FAKE_DB" != absent ]] && echo "pocketboard_pocketboard-postgres"; exit 0 ;;
+  ps)
+    [[ "$FAKE_MODE" == ps-fails ]] && exit 1
+    if [[ "$args" == *status=running* ]]; then
+      [[ "$FAKE_DB" == running ]] && echo "pgcid"
+    else
+      [[ "$FAKE_DB" == running || "$FAKE_DB" == stopped ]] && echo "pgcid"
+    fi
+    exit 0 ;;
+  volume)
+    [[ "$FAKE_MODE" == volume-fails ]] && exit 1
+    if [[ "$args" == *label=* ]]; then
+      [[ "$FAKE_DB" == running || "$FAKE_DB" == stopped ]] && echo "pocketboard_pocketboard-postgres"
+    else
+      echo "pocketboard_pocketboard-postgres-old"
+      [[ "$FAKE_DB" != absent ]] && echo "pocketboard_pocketboard-postgres"
+    fi
+    exit 0 ;;
   image)
     [[ "$FAKE_MODE" == not-local && "$args" == *".Id"* && ! -f "$FAKE_PULLED" ]] && { touch "$FAKE_PULLED"; exit 1; }
     if [[ "$args" == *revision* ]]; then
@@ -184,6 +201,31 @@ FAKE_DB=stopped run ok "$request"
 check "an existing but stopped database is not started from a new definition" \
   '[[ $code == 1 && $output == *"not running"* ]] && ! called " up " && ! called backup'
 
+# --- PR #33 re-review finding 5: discovery fails closed ----------------------
+# A failed lookup used to read as "no database", which starts the new
+# release's PostgreSQL before any backup.
+untouched_database() { [[ $code == 1 ]] && ! called " up " && ! called backup && ! called migrate; }
+# A running database is found by the first lookup and backed up, so the
+# volume lookups only matter when none is running.
+for case in ps-fails:running ps-fails:absent volume-fails:absent volume-fails:unlabelled; do
+  reset_state
+  authorize deploy "$sha"
+  FAKE_DB="${case#*:}" run "${case%:*}" "$request"
+  check "$case: a failed Docker lookup changes nothing"     'untouched_database && [[ $output == *"cannot tell whether the database exists"* ]]'
+done
+
+reset_state
+authorize deploy "$sha"
+FAKE_DB=unlabelled run ok "$request"
+check "an unlabelled volume with the database's name counts as an existing database"   'untouched_database && [[ $output == *"not running"* ]]'
+
+reset_state
+authorize deploy "$old"
+run ok "deploy-$old-$api-$web"
+authorize deploy "$sha"
+FAKE_DB=absent run ok "$request"
+check "a host with a recorded release never gets a new, empty database"   'untouched_database && [[ $output == *"was deployed here before"* ]]'
+
 # --- Redeploys and digests ---------------------------------------------------
 reset_state
 authorize deploy "$sha"
@@ -285,6 +327,16 @@ authorize deploy "$sha" "$api" "$web" "$(date -u -d '+8 days' +%FT%TZ)"
 run ok "$request"
 check "an authorization valid for more than 7 days is refused" 'unauthorized "not authorized"'
 
+# PR #33 re-review finding 8: these sort inside the 7-day window as text but
+# are not real times.
+tomorrow="$(date -u -d '+1 day' +%F)"
+for expiry in "${tomorrow}T99:99:99Z" "${tomorrow}T23:59:60Z" "${tomorrow}T24:00:00Z"; do
+  reset_state
+  authorize deploy "$sha" "$api" "$web" "$expiry"
+  run ok "$request"
+  check "an impossible expiry ($expiry) is refused" 'unauthorized "not authorized"'
+done
+
 reset_state
 authorize deploy "$sha"
 chmod 666 "$auth"
@@ -301,6 +353,13 @@ authorize deploy "$sha"
 run ok "$request"
 run ok "$request"
 check "an authorization is used once; replaying the request is refused" 'unauthorized "already used"'
+# PR #33 re-review finding 9: the host cannot tell who sends a request, so the
+# first sender of an authorized request, with or without the Environment
+# approval, uses the line. ADR 0007 must state that residual rather than claim
+# a copied key cannot change production.
+adr="$here/../../../docs/adr/0007-host-authorization-and-database-boundary.md"
+check "ADR 0007 records that a copied key can use an unused line first" \
+  '! grep -q "can no longer change production" "$adr" && grep -q "can still use a line the owner has added" "$adr"'
 
 reset_state
 authorize deploy "$old"

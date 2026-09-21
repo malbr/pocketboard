@@ -39,7 +39,8 @@ the initial POC.
   reaches root only by starting one polkit-allowed systemd unit (ADR 0006).
 - The host refuses any deploy or rollback without the owner's single-use,
   expiring authorization line naming its SHA and digests, so the SSH key alone
-  cannot change production (ADR 0007).
+  cannot choose what production runs. It can only use an unused line early,
+  before the Environment approval (ADR 0007).
 - Every deploy backs up the database before anything changes it. Rollback
   restarts only the earlier api and web images and never changes the
   database, so CI rejects destructive or rollback-incompatible migrations.

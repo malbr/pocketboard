@@ -43,8 +43,11 @@ For a deploy, the root script then:
    dumped as it runs, found by its Compose labels rather than through the new
    release's compose file. Only a host that has never had a database first
    gets an empty one from the new release, so the backup path is proven there
-   too. A database that exists but is stopped is refused: the new release's
-   definition must not be what starts it. `pocketboard-backup` dumps the
+   too: no PostgreSQL container or volume with the Compose labels, no volume
+   named `pocketboard_pocketboard-postgres` (a volume restored by hand has no
+   labels), and no `ok` line in the ledger. A Docker lookup that fails refuses
+   the deploy. A database that exists but is stopped is refused: the new
+   release's definition must not be what starts it. `pocketboard-backup` dumps the
    database, proves the dump readable with `pg_restore --list`, uploads it
    with Restic to R2, and reads it back to compare SHA-256. No verified backup
    means no database change.
@@ -88,6 +91,10 @@ The SSH gate prints the unit's log back to the caller only when the log's
 first line, `invocation <systemd invocation id>`, changed across its
 `systemctl start`. A start that polkit refused therefore reports
 `no log from this run`, even straight after a real run of the same request.
+The gate handles one request at a time, holding a lock on the log directory
+from before the start until it has read the log, so a concurrent request
+cannot rewrite the log in between. A request queues for up to 30 minutes,
+longer than a deploy may run, so `status` can wait behind a running deploy.
 
 ## Files
 
@@ -96,6 +103,7 @@ first line, `invocation <systemd invocation id>`, changed across its
 | `deploy/vps/ssh-gate` | `/usr/local/lib/pocketboard/ssh-gate` | `root:root 0755` |
 | `deploy/vps/pocketboard-deploy` | `/usr/local/sbin/pocketboard-deploy` | `root:root 0700` |
 | `deploy/vps/pocketboard-backup` | `/usr/local/sbin/pocketboard-backup` | `root:root 0700` |
+| `deploy/vps/pocketboard-restore` | `/usr/local/sbin/pocketboard-restore` | `root:root 0700` |
 | `deploy/vps/config/pocketboard-deploy@.service` | `/etc/systemd/system/pocketboard-deploy@.service` | `root:root 0644` |
 | `deploy/vps/config/50-pocketboard-deploy.rules` | `/etc/polkit-1/rules.d/50-pocketboard-deploy.rules` | `root:root 0644` |
 | `deploy/vps/config/60-pocketboard-deploy.conf` | `/etc/ssh/sshd_config.d/60-pocketboard-deploy.conf` | `root:root 0644` |
@@ -125,7 +133,8 @@ install -d -o root -g root -m 0700 /var/lib/pocketboard/docker \
   /var/lib/pocketboard/backup-tmp /var/cache/pocketboard-restic
 install -d -o root -g root -m 0750 /etc/pocketboard/secrets
 install -o root -g root -m 0755 deploy/vps/ssh-gate /usr/local/lib/pocketboard/ssh-gate
-install -o root -g root -m 0700 deploy/vps/pocketboard-deploy deploy/vps/pocketboard-backup /usr/local/sbin/
+install -o root -g root -m 0700 deploy/vps/pocketboard-deploy deploy/vps/pocketboard-backup \
+  deploy/vps/pocketboard-restore /usr/local/sbin/
 install -o root -g root -m 0644 deploy/vps/config/pocketboard-deploy@.service /etc/systemd/system/
 install -o root -g root -m 0644 deploy/vps/config/50-pocketboard-deploy.rules /etc/polkit-1/rules.d/
 install -o root -g root -m 0644 deploy/vps/config/60-pocketboard-deploy.conf /etc/ssh/sshd_config.d/
@@ -223,7 +232,10 @@ migration. Rollback targets must be recorded `ok` in the ledger.
 
 The GitHub gate and the Environment approval control the workflow. The line
 below is what the host itself checks, so a copied deploy key cannot deploy or
-roll back on its own. As root on the VPS, add one line per approved action to
+roll back anything the owner has not authorized. It can still use an unused
+line first, before the Environment approval (ADR 0007). Add the line just
+before approving the `production` deployment, with a short expiry. As root on
+the VPS, add one line per approved action to
 `/etc/pocketboard/authorized-requests`, using the SHA and digests stated in the
 approved gate:
 
@@ -235,7 +247,8 @@ grep " <sha> .* ok$" /var/lib/pocketboard/releases.log | tail -n 1
 echo "$(date -u -d '+1 day' +%FT%TZ) rollback <sha> sha256:<api> sha256:<web>" >> /etc/pocketboard/authorized-requests
 ```
 
-The expiry must be in the future and at most 7 days away. Each line works
+The expiry must be a real UTC time in exactly this form, in the future and at
+most 7 days away. Each line works
 once: the script records it in `/var/lib/pocketboard/authorizations.used`
 before its first side effect. A failed run needs a new line with a new expiry,
 after a new approval. The file must stay `root`-owned and writable only by
@@ -266,44 +279,26 @@ failing the deploy, because the verified snapshot already exists.
   only after verification, because `pg_restore --clean` into the live database
   drops only objects in the dump. With a newer schema, it errors on objects
   that depend on them, carries on by default, and leaves newer objects behind.
-  As root, in one shell:
+  As root:
 
   ```sh
-  set -a; . /etc/pocketboard/backup.env; set +a      # Restic settings for this shell only
-  export RESTIC_CACHE_DIR=/var/cache/pocketboard-restic
-  dump=/var/lib/pocketboard/backup-tmp/restore.dump
-  label=com.docker.compose.project=pocketboard
-  pg="$(docker ps -q --filter "label=$label" --filter label=com.docker.compose.service=postgres)"
-  psql() { docker exec -i "$pg" psql -U pocketboard -v ON_ERROR_STOP=1 "$@"; }
-
-  # 1. Pick the snapshot and prove the dump is readable.
-  restic snapshots --host pocketboard --tag pocketboard
-  restic dump <snapshot id> /pocketboard.dump > "$dump"
-  docker exec -i "$pg" pg_restore --list < "$dump" > /dev/null
-
-  # 2. Stop the application; PostgreSQL stays up.
-  docker stop $(docker ps -q --filter "label=$label" --filter label=com.docker.compose.service=web) \
-              $(docker ps -q --filter "label=$label" --filter label=com.docker.compose.service=api)
-
-  # 3. Restore into a clean database. Any error stops it and rolls it back.
-  psql -d postgres -c 'DROP DATABASE IF EXISTS pocketboard_restore' \
-       -c 'CREATE DATABASE pocketboard_restore TEMPLATE template0'
-  docker exec -i "$pg" pg_restore -U pocketboard -d pocketboard_restore \
-    --exit-on-error --single-transaction --no-owner < "$dump"
-
-  # 4. Verify the data and the migration state.
-  psql -d pocketboard_restore -c 'SELECT count(*) FROM cards'
-  psql -d pocketboard_restore -tAc 'SELECT count(*), max(created_at) FROM drizzle.__drizzle_migrations'
-
-  # 5. Swap. The replaced database is kept until the restore is confirmed.
-  psql -d postgres -c "ALTER DATABASE pocketboard RENAME TO pocketboard_before_restore_$(date -u +%Y%m%dT%H%M%SZ)" \
-       -c 'ALTER DATABASE pocketboard_restore RENAME TO pocketboard'
-  rm -f "$dump"
+  ( set -a; . /etc/pocketboard/backup.env; restic snapshots --host pocketboard --tag pocketboard )
+  pocketboard-restore <snapshot id>
   ```
 
-  If step 3 fails, drop `pocketboard_restore` and stop: the live database is
-  unchanged. Step 4's `max(created_at)` is the `when` of the last migration in
-  the dump. Pick the release to start: the newest SHA recorded `ok` in the
+  `pocketboard-restore` stops at the first failure. It proves the dump is
+  readable, restores it into an empty `pocketboard_restore` database with
+  `--exit-on-error --single-transaction`, and requires a readable `cards`
+  table and a non-empty Drizzle ledger. Only then does it stop `api` and
+  `web` and swap both database names in one transaction, keeping the replaced
+  database as `pocketboard_before_restore_<UTC time>`. Any earlier failure
+  exits non-zero with the live database and the running application
+  unchanged; a failed swap is rolled back and restarts `api` and `web`.
+  A failed run leaves `pocketboard_restore` for inspection, and the next run
+  replaces it.
+
+  The script prints `last migration when <n>`: the `when` of the last
+  migration in the dump. Pick the release to start: the newest SHA recorded `ok` in the
   ledger whose `packages/api/migrations/meta/_journal.json` (view it on GitHub
   at that SHA) ends with an entry of exactly that `when`. Start it with an
   authorized `rollback <sha>`, which restarts only `api` and `web`. A newer
@@ -319,7 +314,8 @@ failing the deploy, because the verified snapshot already exists.
 - `deploy/vps/tests/integration/database-boundary.test.sh` and
   `restore.test.sh` run in CI with real Docker Compose and PostgreSQL. They
   prove that a rollback leaves the database container alone, and that the
-  restore procedure above works against a newer schema.
+  restore script above works against a newer schema and that its failures
+  stop before any swap.
 - `scripts/release/smoke-production-compose.sh` freezes PostgreSQL under the
   real images and requires `/api/health` to answer 503 throughout, then
   recover.

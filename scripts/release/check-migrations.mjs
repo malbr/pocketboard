@@ -44,22 +44,35 @@ if (problems.length > 0) cannotCheck(problems.join("\n"));
 
 class Unparseable extends Error {}
 
+// NAMEDATALEN - 1 in a default PostgreSQL build.
+const MAX_IDENTIFIER_BYTES = 63;
+
 // Splits SQL into tokens, following
 // https://www.postgresql.org/docs/16/sql-syntax-lexical.html: nested block
 // comments, line comments, '' literals (backslash escapes only in E''),
 // "quoted identifiers", and $tag$ dollar-quoted bodies. Comments are dropped;
 // everything else keeps its source offsets so findings can quote the input.
+// As in PostgreSQL's scanner, whitespace is exactly [ \t\n\r\f\v] and a line
+// comment ends at either CR or LF.
 function tokenize(sql) {
   const tokens = [];
   let i = 0;
   const push = (type, value, start) => tokens.push({ type, value, start, end: i });
+  // PostgreSQL silently truncates a longer identifier, which could turn a name
+  // this check tracks as new into an existing relation.
+  const pushName = (type, value, start) => {
+    if (Buffer.byteLength(value, "utf8") > MAX_IDENTIFIER_BYTES) {
+      throw new Unparseable(`identifier longer than ${MAX_IDENTIFIER_BYTES} bytes would be truncated: ${value}`);
+    }
+    push(type, value, start);
+  };
   while (i < sql.length) {
     const c = sql[i];
     const start = i;
-    if (/\s/.test(c)) {
+    if (/[ \t\n\r\f\v]/.test(c)) {
       i++;
     } else if (c === "-" && sql[i + 1] === "-") {
-      while (i < sql.length && sql[i] !== "\n") i++;
+      while (i < sql.length && sql[i] !== "\n" && sql[i] !== "\r") i++;
     } else if (c === "/" && sql[i + 1] === "*") {
       let depth = 0;
       do {
@@ -110,7 +123,7 @@ function tokenize(sql) {
           value += sql[i++];
         }
       }
-      push("ident", value, start);
+      pushName("ident", value, start);
     } else if (c === "$" && /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.test(sql.slice(i))) {
       const tag = sql.slice(i).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/)[0];
       const close = sql.indexOf(tag, i + tag.length);
@@ -120,8 +133,9 @@ function tokenize(sql) {
       push("dollar", body, start);
     } else if (/[A-Za-z_\u0080-￿]/.test(c)) {
       while (i < sql.length && /[A-Za-z0-9_$\u0080-￿]/.test(sql[i])) i++;
-      // Unquoted identifiers and keywords fold to lower case.
-      push("word", sql.slice(start, i).toLowerCase(), start);
+      // Unquoted identifiers and keywords fold to lower case; in UTF-8 only
+      // ASCII letters fold.
+      pushName("word", sql.slice(start, i).replace(/[A-Z]/g, (letter) => letter.toLowerCase()), start);
     } else if (/[0-9]/.test(c)) {
       while (i < sql.length && /[0-9.eE]/.test(sql[i])) i++;
       push("number", sql.slice(start, i), start);
@@ -171,6 +185,7 @@ function cursor(tokens) {
       return i >= tokens.length;
     },
     rest: () => tokens.slice(i),
+    skip: () => i++,
     peek,
     at: (...words) => words.every((word, k) => isWord(peek(k), word)),
     accept(...words) {
@@ -310,8 +325,13 @@ function checkAlterAction(tokens, freshTable, report) {
     }
     const notNull = definition.some((token, k) => token.value === "not" && definition[k + 1]?.value === "null");
     const defaultAt = definition.findIndex((token) => token.type === "word" && token.value === "default");
-    const hasDefault = defaultAt >= 0 && !(definition[defaultAt + 1]?.type === "word" && definition[defaultAt + 1].value === "null");
-    if (notNull && !hasDefault) report(`adds a NOT NULL without a DEFAULT: ${column.value}`);
+    let nonNullDefault = false;
+    if (defaultAt >= 0) {
+      const expression = defaultExpression(definition.slice(defaultAt + 1));
+      if (!expression) return report(`adds an unsupported DEFAULT expression to an existing table: ${column.value}`);
+      nonNullDefault = expression !== "null";
+    }
+    if (notNull && !nonNullDefault) report(`adds a NOT NULL without a DEFAULT: ${column.value}`);
     return;
   }
 
@@ -323,9 +343,41 @@ function checkAlterAction(tokens, freshTable, report) {
       if (!freshTable) report("SET NOT NULL");
       return;
     }
-    if (a.accept("set", "default") && !a.done) return;
+    if (a.accept("set", "default") && !a.done) {
+      // The previous image may rely on the old default when it inserts.
+      if (!freshTable) report("changes a column default on an existing table");
+      return;
+    }
   }
   return report("unsupported ALTER TABLE action");
+}
+
+// Adding a column evaluates its default for every existing row, and the
+// previous image inserts rows without naming the column. An existing table may
+// therefore only gain a constant or a side-effect-free built-in, followed by
+// nothing but NULL or NOT NULL. Returns "null", "value", or undefined when the
+// expression is not one of those shapes.
+const DEFAULT_FUNCTIONS = ["now", "gen_random_uuid"];
+function defaultExpression(tokens) {
+  const d = cursor(tokens);
+  let kind = "value";
+  if (d.accept("null")) {
+    kind = "null";
+  } else if (d.accept("true") || d.accept("false") || d.accept("current_timestamp")) {
+    // A constant.
+  } else if (DEFAULT_FUNCTIONS.some((name) => d.accept(name))) {
+    if (!d.punct("(") || !d.punct(")")) return undefined;
+  } else if (d.peek()?.type === "string") {
+    d.skip();
+    // An optional cast to a named type, such as '{}'::jsonb.
+    if (d.punct(":") && !(d.punct(":") && d.name())) return undefined;
+  } else {
+    if (!d.punct("-")) d.punct("+");
+    if (d.peek()?.type !== "number") return undefined;
+    d.skip();
+  }
+  const tail = d.rest().map((token) => (token.type === "word" ? token.value : "?")).join(" ");
+  return ["", "null", "not null"].includes(tail) ? kind : undefined;
 }
 
 // Drizzle wraps some DDL as

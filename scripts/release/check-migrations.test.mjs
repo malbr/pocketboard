@@ -222,3 +222,76 @@ test("E-string escapes are respected", () => {
   assertRejected(String.raw`CREATE TABLE "n" ("b" text DEFAULT E'it\'s');
 DROP TABLE cards;`, /DROP/);
 });
+
+// Counterexamples from the PR #33 re-review
+// (https://github.com/malbr/pocketboard/pull/33#issuecomment-5756130698).
+test("a carriage return ends a line comment, as it does in PostgreSQL", () => {
+  assertRejected(`-- note\rDELETE FROM cards;`, /DELETE/);
+  assertRejected(`-- note\rTRUNCATE cards;`, /TRUNCATE/);
+  assertRejected(`-- note\rDROP TABLE cards;`, /DROP/);
+  assertRejected(`CREATE TABLE "n" ("b" text); -- note\r\nDROP TABLE cards;`, /DROP/);
+  assertRejected(`DO $$ BEGIN -- note\rDROP TABLE cards; END $$;`, /DO block/);
+});
+
+test("only PostgreSQL whitespace separates tokens", () => {
+  // U+00A0 is an identifier character to PostgreSQL, so this is one
+  // unrecognised word rather than a CREATE TABLE.
+  assertRejected(`CREATE\u00a0TABLE "n" ("b" text);`, /unsupported statement/);
+  assertAccepted(`CREATE TABLE "n"\v("b"\ftext);`);
+});
+
+test("defaults that break the previous image or run side effects are rejected", () => {
+  assertRejectedAfter(existingCards, `ALTER TABLE cards ALTER COLUMN title SET DEFAULT NULL;`, /default/i);
+  assertRejectedAfter(existingCards, `ALTER TABLE cards ALTER COLUMN title SET DEFAULT 'x';`, /default/i);
+  assertRejectedAfter(existingCards, `ALTER TABLE cards ADD COLUMN b text DEFAULT (NULL) NOT NULL;`, /DEFAULT/);
+  assertRejectedAfter(existingCards, `ALTER TABLE cards ADD COLUMN b text DEFAULT NULL::text NOT NULL;`, /DEFAULT/);
+  assertRejectedAfter(existingCards, `ALTER TABLE cards ADD COLUMN b text DEFAULT nullif('a', 'a') NOT NULL;`, /DEFAULT/);
+  assertRejectedAfter(existingCards, `ALTER TABLE cards ADD COLUMN b bigint DEFAULT setval('s', 1);`, /DEFAULT/);
+  assertRejectedAfter(existingCards, `ALTER TABLE cards ADD COLUMN b bool DEFAULT pg_terminate_backend(1);`, /DEFAULT/);
+  assertRejectedAfter(existingCards, `ALTER TABLE cards ADD COLUMN b int DEFAULT 1 DEFAULT NULL NOT NULL;`, /DEFAULT/);
+});
+
+test("constant and allow-listed defaults on an existing table pass", () => {
+  const result = run(
+    migrations({
+      "0000_base": existingCards,
+      "0001_x": `ALTER TABLE cards ADD COLUMN a integer DEFAULT 1 NOT NULL;
+ALTER TABLE cards ADD COLUMN b text DEFAULT 'x' NOT NULL;
+ALTER TABLE cards ADD COLUMN c boolean DEFAULT false NOT NULL;
+ALTER TABLE cards ADD COLUMN d timestamp with time zone DEFAULT now() NOT NULL;
+ALTER TABLE cards ADD COLUMN e uuid DEFAULT gen_random_uuid() NOT NULL;
+ALTER TABLE cards ADD COLUMN f jsonb DEFAULT '{}'::jsonb NOT NULL;
+ALTER TABLE cards ADD COLUMN g numeric DEFAULT -1.5;
+ALTER TABLE cards ADD COLUMN h text DEFAULT NULL;`,
+    }),
+  );
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("identifiers PostgreSQL would truncate are rejected", () => {
+  const long = "c".repeat(64);
+  assertRejectedAfter(
+    `CREATE TABLE "${long.slice(0, 63)}" ("id" uuid);`,
+    `CREATE TABLE "${long}" ("id" uuid);
+ALTER TABLE "${long}" ADD COLUMN owner text NOT NULL;`,
+    /63 bytes/,
+  );
+  assertRejected(`CREATE TABLE ${long} (id uuid);`, /63 bytes/);
+  // Multibyte characters count in bytes, not UTF-16 code units.
+  assertRejected(`CREATE TABLE "${"é".repeat(32)}" ("id" uuid);`, /63 bytes/);
+  assertAccepted(`CREATE TABLE "${"c".repeat(63)}" ("id" uuid);`);
+});
+
+test("only ASCII letters fold to lower case in unquoted names", () => {
+  // In UTF-8 PostgreSQL folds ÄBC to "Äbc", the existing table, not to the
+  // "äbc" this migration creates.
+  const result = run(
+    migrations({
+      "0000_base": `CREATE TABLE "Äbc" ("id" uuid);`,
+      "0001_x": `CREATE TABLE "äbc" ("id" uuid);
+ALTER TABLE ÄBC ADD COLUMN owner text NOT NULL;`,
+    }),
+  );
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stderr, /NOT NULL without a DEFAULT/);
+});
