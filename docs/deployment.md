@@ -291,9 +291,27 @@ failing the deploy, because the verified snapshot already exists.
   `--exit-on-error --single-transaction`, and requires a readable `cards`
   table and a non-empty Drizzle ledger. Only then does it stop `api` and
   `web` and swap both database names in one transaction, keeping the replaced
-  database as `pocketboard_before_restore_<UTC time>`. Any earlier failure
-  exits non-zero with the live database and the running application
-  unchanged; a failed swap is rolled back and restarts `api` and `web`.
+  database as `pocketboard_before_restore_<YYYYMMDD_HHMMSS UTC>`. Any earlier
+  failure exits non-zero with the live database and the running application
+  unchanged. A failure or interruption (Ctrl-C, a closed session) while it
+  stops `api` and `web` restarts whatever it had stopped. Each restart that
+  fails is named as `FAILED to restart`, so start those by hand.
+
+  An error from the swap does not prove the swap rolled back: PostgreSQL can
+  commit it after the response is lost. The script then waits up to 30
+  seconds for the swap's session to end and asks PostgreSQL which databases
+  exist:
+  - **Rolled back:** it restarts `api` and `web` and fails; the live database
+    is unchanged.
+  - **Committed:** it prints a `WARNING` and continues as a successful swap.
+  - **Cannot tell:** it fails with `could not be established` and leaves
+    `api` and `web` stopped. Run
+    `docker exec <postgres container> psql -U pocketboard -d postgres -c 'SELECT datname FROM pg_database'`.
+    If `pocketboard_restore` is still there, the swap rolled back: start the
+    current release again with an authorized rollback to the SHA in
+    `current`. If a new `pocketboard_before_restore_*` is there, the swap
+    committed: continue below. Otherwise stop and raise it on the issue.
+
   A failed run leaves `pocketboard_restore` for inspection, and the next run
   replaces it.
 
