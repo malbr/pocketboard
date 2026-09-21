@@ -4,7 +4,8 @@
 # account start it, and `systemctl start` blocks until the run finishes.
 [Unit]
 Description=PocketBoard deploy request %i
-Requires=docker.service
+# Ordering only, never a dependency: a status request must not start Docker.
+# deploy and rollback refuse to run while Docker is stopped.
 After=docker.service network-online.target
 Wants=network-online.target
 
@@ -22,6 +23,9 @@ StandardError=inherit
 UMask=0022
 TimeoutStartSec=25min
 NoNewPrivileges=yes
-PrivateTmp=yes
+# A private, empty /tmp. Not PrivateTmp=: its host directory name embeds the
+# unit name, and a deploy request's name is long enough to exceed the 255-byte
+# file name limit, so systemd could not start the unit at all.
+TemporaryFileSystem=/tmp /var/tmp
 ProtectHome=yes
 ProtectSystem=full

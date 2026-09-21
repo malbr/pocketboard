@@ -3,7 +3,7 @@
 # verify-before-upload and verify-after-upload rules are covered without a
 # database, R2, or credentials.
 # Assertions are single-quoted on purpose: check() evaluates them after each run.
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016,SC2034
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -89,10 +89,15 @@ no_dump_left() { [[ -z "$(find "$work/tmp" -type f 2>/dev/null)" ]]; }
 write_env
 run ok "$sha"
 check "a verified backup succeeds" '[[ $code == 0 && $output == *"verified backup"* && $output == *"snapshot 5e1f00d1"* ]]'
-check "the dump is streamed to restic under a fixed name tagged with the release" \
-  'grep -q -- "--stdin --stdin-filename pocketboard-[0-9TZ]*-$sha.dump" "$work/calls" && grep -q -- "--tag sha-$sha" "$work/calls"'
-check "the uploaded snapshot is read back" 'grep -q "^restic dump 5e1f00d1" "$work/calls"'
+# Restic groups retention by host and paths by default, so a per-run file name
+# put every snapshot in its own group and kept all of them (PR #29 review,
+# finding 6). The path is stable and the release lives only in a tag.
+check "the dump is streamed to restic under one stable path, tagged with the release" \
+  'grep -q -- "--stdin --stdin-filename pocketboard.dump\$" "$work/calls" && grep -q -- "--tag sha-$sha" "$work/calls"'
+check "the uploaded snapshot is read back from that path" 'grep -q "^restic dump 5e1f00d1[0-9a-f]* /pocketboard.dump$" "$work/calls"'
 check "retention runs after the verified upload" 'grep -q -- "^restic forget .*--keep-daily 7 --keep-weekly 4 --keep-monthly 3 --prune" "$work/calls"'
+check "retention groups every PocketBoard snapshot together, not per tag or path" \
+  'grep -q -- "^restic forget --host pocketboard --tag pocketboard --group-by host " "$work/calls"'
 check "the local dump is deleted" no_dump_left
 check "no secret value reaches the output" '[[ $output != *test-only* ]]'
 

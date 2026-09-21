@@ -193,6 +193,14 @@ jobs:
           bash deploy/vps/tests/pocketboard-deploy.test.sh
           bash deploy/vps/tests/pocketboard-backup.test.sh
 
+      # Real Compose and PostgreSQL (the image pinned in compose.production.yml):
+      # an application rollback leaves the database container alone, and the
+      # documented restore works against a newer schema.
+      - name: Integration-test the database boundary and restore procedure
+        run: |
+          bash deploy/vps/tests/integration/database-boundary.test.sh
+          bash deploy/vps/tests/integration/restore.test.sh
+
       # Production rolls back the image, never the database, so every
       # migration must stay compatible with the previous image (issue #8).
       - name: Check migrations are backward compatible

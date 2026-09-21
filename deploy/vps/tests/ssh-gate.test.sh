@@ -2,7 +2,7 @@
 # Exercises ssh-gate against a fake `systemctl`, so every accepted and refused
 # request is covered without systemd, polkit, or root.
 # Assertions are single-quoted on purpose: check() evaluates them after each run.
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016,SC2034
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -18,12 +18,14 @@ mkdir -p "$work/bin" "$work/log"
 cat > "$work/bin/systemctl" <<'FAKE'
 #!/usr/bin/env bash
 # Records its arguments; writes the unit's log unless told the unit never ran.
+# Like the real unit, every run starts its log with a fresh invocation id.
 printf '%s\n' "$*" >> "$FAKE_CALLS"
 unit="${@: -1}"
 instance="${unit#pocketboard-deploy@}"
 instance="${instance%.service}"
 if [[ "$FAKE_SYSTEMCTL" != denied ]]; then
-  echo "log line from $instance" > "$POCKETBOARD_GATE_LOG_DIR/$instance.log"
+  printf 'invocation %s\nlog line from %s, run %s\n' "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" \
+    "$instance" "$RANDOM" > "$POCKETBOARD_GATE_LOG_DIR/$instance.log"
 fi
 case "$FAKE_SYSTEMCTL" in
   ok) exit 0 ;;
@@ -68,11 +70,25 @@ run "rollback $sha" failed
 check "a failed unit fails the SSH command and still shows its log" \
   '[[ $code == 1 && $output == *"log line from rollback-$sha"* ]]'
 
-echo "stale output from an earlier run" > "$work/log/status.log"
+printf 'invocation %s\nstale output from an earlier run\n' "$(printf 'c%.0s' {1..32})" > "$work/log/status.log"
 touch -d '1 hour ago' "$work/log/status.log"
 run "status" denied
 check "an old log is never shown as this run's result" \
   '[[ $code == 1 && $output != *"stale output"* && $output == *"no log from this run"* ]]'
+
+# PR #29 review finding 8: whole-second timestamps let an earlier run from the
+# same second pass as fresh. A refused retry straight after a real run must
+# not print that run's log.
+run "rollback $sha" ok
+previous="$output"
+run "rollback $sha" denied
+check "an immediate refused retry does not show the previous run's log" \
+  '[[ $code == 1 && $output != *"log line from"* && $output == *"no log from this run"* && -n $previous ]]'
+
+echo "log line from something without an invocation id" > "$work/log/status.log"
+run "status" denied
+check "a log without an invocation id is never shown" \
+  '[[ $code == 1 && $output != *"log line from"* ]]'
 
 refused=(
   ""

@@ -3,6 +3,12 @@
 // back the database (issue #8). There is deliberately no allowlist or bypass:
 // such a migration needs its own human-approved issue that designs one.
 //
+// The check is an allowlist, not a blocklist. Each statement is tokenised with
+// PostgreSQL's lexical rules and must match one of a few additive shapes
+// (CREATE TYPE ... AS ENUM, CREATE TABLE, CREATE INDEX, ALTER TABLE ... ADD,
+// ALTER TYPE ... ADD VALUE, and Drizzle's single-statement DO wrapper). Anything
+// else, including dynamic SQL, functions, CTEs and data changes, is rejected.
+//
 // Usage: node scripts/release/check-migrations.mjs <migrations folder>
 // Exit 0: every journal entry checked and compatible. Exit 1: findings.
 // Exit 2: the folder could not be checked, which never counts as a pass.
@@ -36,61 +42,350 @@ const problems = [
 ];
 if (problems.length > 0) cannotCheck(problems.join("\n"));
 
-// Comments and quoted literals are blanked so their text cannot trigger or
-// hide a rule. Dollar-quoted bodies are kept: Drizzle emits DDL inside
-// `DO $$ ... $$` blocks, and that DDL must be checked like any other.
-function strip(sql) {
-  return sql
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/--[^\n]*/g, " ")
-    .replace(/'(?:[^']|'')*'/g, "''");
+class Unparseable extends Error {}
+
+// Splits SQL into tokens, following
+// https://www.postgresql.org/docs/16/sql-syntax-lexical.html: nested block
+// comments, line comments, '' literals (backslash escapes only in E''),
+// "quoted identifiers", and $tag$ dollar-quoted bodies. Comments are dropped;
+// everything else keeps its source offsets so findings can quote the input.
+function tokenize(sql) {
+  const tokens = [];
+  let i = 0;
+  const push = (type, value, start) => tokens.push({ type, value, start, end: i });
+  while (i < sql.length) {
+    const c = sql[i];
+    const start = i;
+    if (/\s/.test(c)) {
+      i++;
+    } else if (c === "-" && sql[i + 1] === "-") {
+      while (i < sql.length && sql[i] !== "\n") i++;
+    } else if (c === "/" && sql[i + 1] === "*") {
+      let depth = 0;
+      do {
+        if (sql.startsWith("/*", i)) {
+          depth++;
+          i += 2;
+        } else if (sql.startsWith("*/", i)) {
+          depth--;
+          i += 2;
+        } else if (i >= sql.length) {
+          throw new Unparseable("unterminated block comment");
+        } else {
+          i++;
+        }
+      } while (depth > 0);
+    } else if (c === "'" || ((c === "E" || c === "e") && sql[i + 1] === "'")) {
+      const escapes = c !== "'";
+      i += escapes ? 2 : 1;
+      let value = "";
+      for (;;) {
+        if (i >= sql.length) throw new Unparseable("unterminated string literal");
+        if (escapes && sql[i] === "\\") {
+          value += sql[i + 1] ?? "";
+          i += 2;
+        } else if (sql[i] === "'" && sql[i + 1] === "'") {
+          value += "'";
+          i += 2;
+        } else if (sql[i] === "'") {
+          i++;
+          break;
+        } else {
+          value += sql[i++];
+        }
+      }
+      push("string", value, start);
+    } else if (c === '"') {
+      i++;
+      let value = "";
+      for (;;) {
+        if (i >= sql.length) throw new Unparseable("unterminated quoted identifier");
+        if (sql[i] === '"' && sql[i + 1] === '"') {
+          value += '"';
+          i += 2;
+        } else if (sql[i] === '"') {
+          i++;
+          break;
+        } else {
+          value += sql[i++];
+        }
+      }
+      push("ident", value, start);
+    } else if (c === "$" && /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.test(sql.slice(i))) {
+      const tag = sql.slice(i).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/)[0];
+      const close = sql.indexOf(tag, i + tag.length);
+      if (close < 0) throw new Unparseable("unterminated dollar-quoted string");
+      const body = sql.slice(i + tag.length, close);
+      i = close + tag.length;
+      push("dollar", body, start);
+    } else if (/[A-Za-z_\u0080-￿]/.test(c)) {
+      while (i < sql.length && /[A-Za-z0-9_$\u0080-￿]/.test(sql[i])) i++;
+      // Unquoted identifiers and keywords fold to lower case.
+      push("word", sql.slice(start, i).toLowerCase(), start);
+    } else if (/[0-9]/.test(c)) {
+      while (i < sql.length && /[0-9.eE]/.test(sql[i])) i++;
+      push("number", sql.slice(start, i), start);
+    } else {
+      i++;
+      push("punct", c, start);
+    }
+  }
+  return tokens;
 }
 
-const tableName = (quoted) => quoted.split(".").pop().replace(/"/g, "").toLowerCase();
-const IDENT = String.raw`((?:"[^"]+"|[A-Za-z_][\w$]*)(?:\.(?:"[^"]+"|[A-Za-z_][\w$]*))?)`;
-const CREATE_TABLE = new RegExp(String.raw`\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?${IDENT}`, "gi");
-const ALTER_TABLE = new RegExp(String.raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?${IDENT}`, "i");
-const UNIQUE_INDEX_ON = new RegExp(String.raw`\bCREATE\s+UNIQUE\s+INDEX\b.*?\bON\s+(?:ONLY\s+)?${IDENT}`, "is");
+function splitStatements(tokens) {
+  const statements = [];
+  let current = [];
+  for (const token of tokens) {
+    if (token.type === "punct" && token.value === ";") {
+      if (current.length > 0) statements.push(current);
+      current = [];
+    } else {
+      current.push(token);
+    }
+  }
+  if (current.length > 0) statements.push(current);
+  return statements;
+}
 
-// Always rejected: these lose data or break an older image whatever the table.
-const destructive = [
-  [/\bDROP\b/i, "DROP"],
-  [/\bTRUNCATE\b/i, "TRUNCATE"],
-  [/^\s*DELETE\b|\bDELETE\s+FROM\b/i, "DELETE"],
-  [/^\s*UPDATE\b/i, "UPDATE rewrites existing rows"],
-  [/\bRENAME\b/i, "RENAME"],
-  [/\bALTER\s+COLUMN\s+\S+\s+(?:SET\s+DATA\s+)?TYPE\b/i, "changes a column type"],
-];
+// Splits at commas outside parentheses: ALTER TABLE actions, for example.
+function splitTopLevel(tokens) {
+  const parts = [[]];
+  let depth = 0;
+  for (const token of tokens) {
+    if (token.type === "punct" && token.value === "(") depth++;
+    if (token.type === "punct" && token.value === ")") depth--;
+    if (depth === 0 && token.type === "punct" && token.value === ",") parts.push([]);
+    else parts.at(-1).push(token);
+  }
+  return parts;
+}
 
-// Rejected only on tables that already existed: an older image still writes
-// rows that would violate them. A table created in the same migration has no
-// rows and no older image that knows it.
-const incompatibleOnExistingTable = [
-  [/\bSET\s+NOT\s+NULL\b/i, "SET NOT NULL"],
-  [(s) => /\bADD\s+COLUMN\b/i.test(s) && /\bNOT\s+NULL\b/i.test(s) && !/\bDEFAULT\b/i.test(s), "adds a NOT NULL without a DEFAULT"],
-  [/\bADD\s+(?:CONSTRAINT|PRIMARY\s+KEY|UNIQUE|CHECK|FOREIGN\s+KEY|EXCLUDE)\b/i, "adds a constraint"],
-];
+// A cursor over one statement's tokens.
+function cursor(tokens) {
+  let i = 0;
+  const peek = (offset = 0) => tokens[i + offset];
+  const isWord = (token, ...words) => token?.type === "word" && words.includes(token.value);
+  return {
+    get done() {
+      return i >= tokens.length;
+    },
+    rest: () => tokens.slice(i),
+    peek,
+    at: (...words) => words.every((word, k) => isWord(peek(k), word)),
+    accept(...words) {
+      if (!words.every((word, k) => isWord(peek(k), word))) return false;
+      i += words.length;
+      return true;
+    },
+    punct(value) {
+      if (peek()?.type !== "punct" || peek().value !== value) return false;
+      i++;
+      return true;
+    },
+    // Schema-qualified relation name. Unqualified names resolve to `public`,
+    // the migrator's search path; quoted names keep their case.
+    name() {
+      const parts = [];
+      do {
+        const token = peek();
+        if (token?.type !== "word" && token?.type !== "ident") return undefined;
+        parts.push(token.value);
+        i++;
+      } while (this.punct("."));
+      if (parts.length > 2) return undefined;
+      return parts.length === 1 ? `public.${parts[0]}` : parts.join(".");
+    },
+    // Consumes one balanced (...) group.
+    group() {
+      if (!this.punct("(")) return false;
+      let depth = 1;
+      while (depth > 0) {
+        const token = tokens[i++];
+        if (!token) return false;
+        if (token.type === "punct" && token.value === "(") depth++;
+        if (token.type === "punct" && token.value === ")") depth--;
+      }
+      return true;
+    },
+  };
+}
+
+const CONSTRAINT_WORDS = ["constraint", "primary", "unique", "check", "foreign", "exclude", "references", "generated"];
+
+// Checks one statement. `known` holds every relation created by an earlier
+// migration or statement; `fresh` holds those created in this migration,
+// which have no rows and no older image that uses them.
+function checkStatement(tokens, { known, fresh }, report, insideDo = false) {
+  const s = cursor(tokens);
+  const first = s.peek();
+  if (first?.type !== "word") return report("unsupported statement");
+
+  if (s.accept("create", "type")) {
+    const name = s.name();
+    if (!name || !s.accept("as", "enum") || !s.group() || !s.done) return report("unsupported CREATE TYPE");
+    return;
+  }
+
+  if (s.accept("create", "table")) {
+    s.accept("if", "not", "exists");
+    const name = s.name();
+    if (!name || !s.group() || !s.done) return report("unsupported CREATE TABLE form");
+    if (known.has(name)) return report(`creates a table that already exists (${name})`);
+    known.add(name);
+    fresh.add(name);
+    return;
+  }
+
+  if (s.at("create", "index") || s.at("create", "unique", "index")) {
+    s.accept("create");
+    const unique = s.accept("unique");
+    s.accept("index");
+    s.accept("concurrently");
+    s.accept("if", "not", "exists");
+    if (!s.at("on")) s.name();
+    if (!s.accept("on")) return report("unsupported CREATE INDEX form");
+    s.accept("only");
+    const table = s.name();
+    if (!table) return report("unsupported CREATE INDEX form");
+    if (unique && !fresh.has(table)) report("adds a unique index to an existing table");
+    return;
+  }
+
+  if (s.accept("alter", "type")) {
+    if (!s.name()) return report("unsupported ALTER TYPE");
+    if (s.at("rename")) return report("RENAME");
+    if (!s.accept("add", "value")) return report("unsupported ALTER TYPE action");
+    s.accept("if", "not", "exists");
+    if (s.peek()?.type !== "string") return report("unsupported ALTER TYPE action");
+    const tail = s.rest().slice(1);
+    const validTail =
+      tail.length === 0 ||
+      (tail.length === 2 && ["before", "after"].includes(tail[0].value) && tail[1].type === "string");
+    if (!validTail) report("unsupported ALTER TYPE action");
+    return;
+  }
+
+  if (s.accept("alter", "table")) {
+    s.accept("if", "exists");
+    s.accept("only");
+    const table = s.name();
+    if (!table) return report("unsupported ALTER TABLE form");
+    if (s.at("rename")) return report("RENAME");
+    for (const action of splitTopLevel(s.rest())) {
+      checkAlterAction(action, fresh.has(table), report);
+    }
+    return;
+  }
+
+  if (s.at("do")) {
+    return checkDoBlock(tokens, { known, fresh }, report, insideDo);
+  }
+
+  const leading = { drop: "DROP", truncate: "TRUNCATE", delete: "DELETE", update: "UPDATE rewrites existing rows" };
+  if (leading[first.value]) return report(leading[first.value]);
+  return report("unsupported statement");
+}
+
+function checkAlterAction(tokens, freshTable, report) {
+  const a = cursor(tokens);
+  if (a.at("drop")) return report("DROP");
+  if (a.at("rename")) return report("RENAME");
+
+  if (a.accept("add")) {
+    const tableConstraint = ["constraint", "primary", "unique", "check", "foreign", "exclude"].some((word) => a.at(word));
+    if (tableConstraint) {
+      if (!freshTable) report("adds a constraint to an existing table");
+      return;
+    }
+    a.accept("column");
+    a.accept("if", "not", "exists");
+    const column = a.peek();
+    if (column?.type !== "word" && column?.type !== "ident") return report("unsupported ALTER TABLE action");
+    if (freshTable) return;
+    const definition = a.rest().slice(1);
+    const words = definition.filter((token) => token.type === "word").map((token) => token.value);
+    if (CONSTRAINT_WORDS.some((word) => words.includes(word))) {
+      report(`adds a constraint to an existing table: ${column.value}`);
+    }
+    const notNull = definition.some((token, k) => token.value === "not" && definition[k + 1]?.value === "null");
+    const defaultAt = definition.findIndex((token) => token.type === "word" && token.value === "default");
+    const hasDefault = defaultAt >= 0 && !(definition[defaultAt + 1]?.type === "word" && definition[defaultAt + 1].value === "null");
+    if (notNull && !hasDefault) report(`adds a NOT NULL without a DEFAULT: ${column.value}`);
+    return;
+  }
+
+  if (a.accept("alter")) {
+    a.accept("column");
+    if (!a.name()) return report("unsupported ALTER TABLE action");
+    if (a.at("type") || a.at("set", "data", "type")) return report("changes a column type");
+    if (a.at("set", "not", "null")) {
+      if (!freshTable) report("SET NOT NULL");
+      return;
+    }
+    if (a.accept("set", "default") && !a.done) return;
+  }
+  return report("unsupported ALTER TABLE action");
+}
+
+// Drizzle wraps some DDL as
+//   DO $$ BEGIN <one statement>; EXCEPTION WHEN <condition> THEN null; END $$;
+// Exactly that shape is accepted, and the inner statement is checked like any
+// other. Any other PL/pgSQL (EXECUTE, several statements, PERFORM, loops) is
+// dynamic code this check cannot reason about.
+function checkDoBlock(tokens, state, report, insideDo) {
+  const reject = () => report("DO block is not a single guarded statement");
+  const [, body, ...tail] = tokens;
+  if (insideDo || body?.type !== "dollar") return reject();
+  const languageOk =
+    tail.length === 0 ||
+    (tail.length === 2 && tail[0].type === "word" && tail[0].value === "language" && tail[1].value === "plpgsql");
+  if (!languageOk) return reject();
+
+  let inner;
+  try {
+    inner = splitStatements(tokenize(body.value));
+  } catch (error) {
+    return report(error.message);
+  }
+  const words = (statement) => statement.map((token) => (token.type === "word" ? token.value : `\u0000${token.value}`));
+  if (inner.length < 2 || words(inner[0])[0] !== "begin") return reject();
+  const statement = inner[0].slice(1);
+  const last = words(inner.at(-1));
+  if (inner.length === 2) {
+    if (last.join(" ") !== "end") return reject();
+  } else if (inner.length === 3) {
+    const handler = words(inner[1]);
+    const guarded =
+      handler[0] === "exception" &&
+      handler[1] === "when" &&
+      handler.at(-2) === "then" &&
+      handler.at(-1) === "null" &&
+      handler.slice(2, -2).every((word, k) => (k % 2 === 0 ? /^[a-z_]+$/.test(word) : word === "or"));
+    if (!guarded || last.join(" ") !== "end") return reject();
+  } else {
+    return reject();
+  }
+  if (statement.length === 0) return reject();
+  checkStatement(statement, state, (reason) => report(`DO block: ${reason}`), true);
+}
 
 const findings = [];
+const known = new Set();
 for (const tag of tags) {
   const file = `${tag}.sql`;
-  const sql = strip(readFileSync(path.join(dir, file), "utf8"));
-  const created = new Set([...sql.matchAll(CREATE_TABLE)].map((match) => tableName(match[1])));
-  const statements = sql.split(";").map((s) => s.replace(/\s+/g, " ").trim()).filter(Boolean);
-
-  for (const statement of statements) {
-    const report = (reason) => findings.push(`${file}: ${reason}: ${statement}`);
-    for (const [pattern, reason] of destructive) {
-      if (pattern.test(statement)) report(reason);
-    }
-    const altered = statement.match(ALTER_TABLE);
-    if (altered && !created.has(tableName(altered[1]))) {
-      for (const [rule, reason] of incompatibleOnExistingTable) {
-        if (typeof rule === "function" ? rule(statement) : rule.test(statement)) report(reason);
-      }
-    }
-    const unique = statement.match(UNIQUE_INDEX_ON);
-    if (unique && !created.has(tableName(unique[1]))) report("adds a unique index to an existing table");
+  const source = readFileSync(path.join(dir, file), "utf8");
+  let statements;
+  try {
+    statements = splitStatements(tokenize(source));
+  } catch (error) {
+    findings.push(`${file}: ${error.message}; the file cannot be checked`);
+    continue;
+  }
+  const fresh = new Set();
+  for (const tokens of statements) {
+    const text = source.slice(tokens[0].start, tokens.at(-1).end).replace(/\s+/g, " ");
+    checkStatement(tokens, { known, fresh }, (reason) => findings.push(`${file}: ${reason}: ${text}`));
   }
 }
 

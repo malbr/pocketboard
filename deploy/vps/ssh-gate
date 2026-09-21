@@ -30,16 +30,21 @@ else
   exit 2
 fi
 
-started="$(date +%s)"
+# The unit truncates its log and the root script's first line is
+# `invocation <systemd invocation id>`, which is unique per run. The log is
+# this request's result only if that id changed across `systemctl start`;
+# otherwise it belongs to an earlier run, for example when polkit refused
+# this start. Timestamps cannot tell two runs in the same second apart.
+log="$log_dir/$instance.log"
+invocation() { sed -n '1s/^invocation \([0-9a-f]\{32\}\)$/\1/p' "$log" 2> /dev/null || true; }
+
+before="$(invocation)"
 code=0
 # A oneshot unit blocks `start` until it finishes and returns its result.
 systemctl --no-ask-password start "pocketboard-deploy@${instance}.service" || code=$?
+after="$(invocation)"
 
-# The unit writes its own log. A log older than this request belongs to an
-# earlier run (for example when polkit refused the start) and must not be
-# reported as this run's result.
-log="$log_dir/$instance.log"
-if [[ -f "$log" ]] && (( $(stat -c %Y "$log") >= started )); then
+if [[ -n "$after" && "$after" != "$before" ]]; then
   cat "$log"
 else
   echo "no log from this run: the unit did not start (systemctl exit $code)" >&2

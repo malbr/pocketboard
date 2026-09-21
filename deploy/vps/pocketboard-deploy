@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
-# Root deploy script (issue #8, ADR 0006). Installed root-owned at
+# Root deploy script (issue #8, ADR 0006, ADR 0007). Installed root-owned at
 # /usr/local/sbin/pocketboard-deploy and run only by the systemd unit
 # pocketboard-deploy@<request>.service, whose instance name is the request:
 #
 #   deploy-<sha>-<api digest hex>-<web digest hex>
-#       fetch compose for <sha>, pull and verify both images, back up,
-#       migrate once, start, check health, record
+#       fetch compose for <sha>, pull and verify both images, back up the
+#       database, then change it (reconcile, migrate once), start, check
+#       health, record
 #   rollback-<sha>
-#       restart a release that previously deployed successfully, using its
-#       stored compose file and digests; never backs up, migrates, or
-#       touches the database
+#       restart the api and web images of a release that previously deployed
+#       successfully, using its stored compose file and digests; never backs
+#       up, migrates, or touches the database container
 #   status
-#       report the running release; changes nothing
+#       report the running release; reads only, and never starts Docker
+#
+# deploy and rollback also need a matching, unexpired, unused line in the
+# owner's root-owned authorization file (ADR 0007), so holding the SSH key is
+# not enough to change production.
 #
 # The SSH gate already validated the request; it is validated again here so
 # this script never depends on its caller. Every failure stops the sequence
@@ -20,15 +25,21 @@
 set -euo pipefail
 umask 022
 
+# The SSH gate matches this line to the run it started (see ssh-gate).
+echo "invocation ${INVOCATION_ID:-none}"
+
 readonly repo="malbr/pocketboard"
 readonly registry="ghcr.io/malbr"
 state="${POCKETBOARD_STATE_DIR:-/var/lib/pocketboard}"
 secrets="${POCKETBOARD_SECRETS_DIR:-/etc/pocketboard/secrets}"
 backup="${POCKETBOARD_BACKUP:-/usr/local/sbin/pocketboard-backup}"
+authorizations="${POCKETBOARD_AUTHORIZATIONS:-/etc/pocketboard/authorized-requests}"
+owner_uid="${POCKETBOARD_EXPECTED_OWNER_UID:-0}"
 health_attempts="${POCKETBOARD_HEALTH_ATTEMPTS:-24}"
 health_delay="${POCKETBOARD_HEALTH_DELAY:-5}"
 web_port="${WEB_PORT:-8080}"
 ledger="$state/releases.log"
+used="$state/authorizations.used"
 
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
 die() { log "FAILED: $*" >&2; exit 1; }
@@ -50,8 +61,9 @@ if [[ "$action" != status && ! "${PUBLIC_URL:-}" =~ ^https://[A-Za-z0-9.-]+(:[0-
   refuse "PUBLIC_URL must be set to the https:// origin in /etc/pocketboard/deploy.env"
 fi
 
-mkdir -p "$state/releases"
-touch "$ledger"
+# Any docker CLI call can socket-activate the daemon, so nothing calls docker
+# unless the service is already running.
+docker_running() { systemctl is-active --quiet docker.service; }
 
 # Runs Compose against one stored release. The variables are exported so that
 # Compose's required ${...:?} interpolation sees them.
@@ -60,6 +72,88 @@ compose() {
     docker compose --project-name pocketboard --project-directory "$state/releases/$sha" \
     -f "$state/releases/$sha/compose.production.yml" "$@"
 }
+
+if [[ "$action" == status ]]; then
+  # Reads only: no directory, ledger, or lock is created, and Docker is left
+  # as it is.
+  if [[ ! -s "$state/current" ]]; then
+    echo "no release recorded"
+    exit 0
+  fi
+  read -r sha api web < "$state/current"
+  echo "current: $sha $api $web"
+  echo "recent ledger entries:"
+  tail -n 5 "$ledger" 2> /dev/null || true
+  if docker_running; then
+    compose ps --format 'table {{.Service}}\t{{.Status}}' || echo "compose ps failed"
+  else
+    echo "docker is not running"
+  fi
+  exit 0
+fi
+
+# Returns the first authorization line for "<action> <sha> <api> <web>" that
+# is well formed, unexpired, at most 7 days out, and not yet used. The file is
+# written by the owner as root; nothing here ever writes it.
+find_authorization() {
+  local wanted="$1" now latest expiry rest line spent=no
+  [[ -f "$authorizations" ]] || return 1
+  [[ "$(stat -c '%u %a' "$authorizations")" =~ ^$owner_uid\ 6[04][04]$ ]] \
+    || refuse "$authorizations must be owned by uid $owner_uid and writable only by it"
+  now="$(date -u +%FT%TZ)"
+  latest="$(date -u -d '+7 days' +%FT%TZ)"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)\ (.+)$ ]] || continue
+    expiry="${BASH_REMATCH[1]}" rest="${BASH_REMATCH[2]}"
+    [[ "$rest" == "$wanted" && "$expiry" > "$now" && ! "$expiry" > "$latest" ]] || continue
+    if [[ -f "$used" ]] && grep -Fxq -- "$line" "$used"; then
+      spent=yes
+      continue
+    fi
+    printf '%s\n' "$line"
+    return 0
+  done < "$authorizations"
+  [[ "$spent" == no ]] || refuse "the authorization for '$wanted' was already used; the owner must add a new line"
+  return 1
+}
+
+# Checked before the state directory exists, so an unauthorized request
+# leaves no trace on the host other than this unit's log. A rollback is
+# checked again below, against the digests its ledger line records.
+if [[ "$action" == deploy ]]; then
+  find_authorization "deploy $sha $api $web" > /dev/null \
+    || refuse "deploy $sha $api $web is not authorized in $authorizations"
+elif ! grep -Eq "^[0-9TZ:-]+ rollback $sha sha256:[0-9a-f]{64} sha256:[0-9a-f]{64}\$" "$authorizations" 2> /dev/null; then
+  refuse "rollback $sha is not authorized in $authorizations"
+fi
+
+docker_running || die "docker is not running; start it deliberately before a $action"
+
+mkdir -p "$state/releases"
+touch "$ledger"
+exec 9> "$state/deploy.lock"
+flock -n 9 || die "another deploy or rollback is running"
+
+if [[ "$action" == rollback ]]; then
+  # Only a release that once passed every check may come back, with exactly
+  # the digests and compose file recorded then.
+  previous="$(awk -v s="$sha" '$3 == s && $6 == "ok" { line = $4 " " $5 } END { print line }' "$ledger")"
+  [[ -n "$previous" ]] || die "no successful deploy of $sha is recorded; refusing to roll back to it"
+  read -r api web <<< "$previous"
+  [[ -s "$state/releases/$sha/compose.production.yml" ]] || die "stored compose file for $sha is missing"
+else
+  known="$(awk -v s="$sha" '$3 == s && $6 == "ok" { print $4 " " $5 }' "$ledger" | sort -u)"
+  if [[ -n "$known" && "$known" != "$api $web" ]]; then
+    die "$sha was deployed before with different digests ($known); refusing"
+  fi
+fi
+
+# The authorization is consumed under the lock, before the first side effect,
+# so a replayed request cannot use it again.
+authorization="$(find_authorization "$action $sha $api $web")" \
+  || refuse "$action $sha $api $web is not authorized in $authorizations"
+printf '%s\n' "$authorization" >> "$used"
+log "authorized by: $authorization"
 
 image_ref() { echo "$registry/pocketboard-$1:$sha@$2"; }
 
@@ -108,35 +202,16 @@ record() {
   printf '%s %s %s %s %s %s\n' "$(date -u +%FT%TZ)" "$action" "$sha" "$api" "$web" "$1" >> "$ledger"
 }
 
-if [[ "$action" == status ]]; then
-  if [[ ! -s "$state/current" ]]; then
-    echo "no release recorded"
-    exit 0
-  fi
-  read -r sha api web < "$state/current"
-  echo "current: $sha $api $web"
-  echo "recent ledger entries:"
-  tail -n 5 "$ledger"
-  compose ps --format 'table {{.Service}}\t{{.Status}}' || echo "compose ps failed"
-  exit 0
-fi
-
-exec 9> "$state/deploy.lock"
-flock -n 9 || die "another deploy or rollback is running"
-
-if [[ "$action" == rollback ]]; then
-  # Only a release that once passed every check may come back, with exactly
-  # the digests and compose file recorded then.
-  previous="$(awk -v s="$sha" '$3 == s && $6 == "ok" { line = $4 " " $5 } END { print line }' "$ledger")"
-  [[ -n "$previous" ]] || die "no successful deploy of $sha is recorded; refusing to roll back to it"
-  read -r api web <<< "$previous"
-  [[ -s "$state/releases/$sha/compose.production.yml" ]] || die "stored compose file for $sha is missing"
-else
-  known="$(awk -v s="$sha" '$3 == s && $6 == "ok" { print $4 " " $5 }' "$ledger" | sort -u)"
-  if [[ -n "$known" && "$known" != "$api $web" ]]; then
-    die "$sha was deployed before with different digests ($known); refusing"
-  fi
-fi
+# The database is found by its Compose labels, not through any release's
+# compose file, so looking at it never changes it.
+database_running() {
+  [[ -n "$(docker ps --quiet --filter label=com.docker.compose.project=pocketboard \
+    --filter label=com.docker.compose.service=postgres --filter status=running)" ]]
+}
+database_exists() {
+  [[ -n "$(docker volume ls --quiet --filter label=com.docker.compose.project=pocketboard \
+    --filter label=com.docker.compose.volume=pocketboard-postgres)" ]]
+}
 
 # From here on, any exit that is not a success is recorded as a failed
 # attempt. The previous `current` release is left as it was.
@@ -158,17 +233,32 @@ if [[ "$action" == deploy ]]; then
   ensure_image "$(image_ref api "$api")" yes
   ensure_image "$(image_ref web "$web")" yes
 
-  # The database must be up to be dumped; on a first deploy this creates it.
+  # Nothing may change the database before a verified backup of it exists.
+  # A live database is backed up as it runs; only a host that has never had
+  # one gets a new, empty database first, so the backup path is still proven.
+  if database_running; then
+    "$backup" "$sha" || die "backup was not verified; the database was not changed"
+  elif database_exists; then
+    die "the database exists but is not running; start it with its current release before deploying"
+  else
+    log "no database yet: creating it for the first deploy"
+    compose up -d --wait --wait-timeout 120 postgres || die "postgres did not become healthy"
+    "$backup" "$sha" || die "backup was not verified; migrations were not run"
+  fi
+  # Applies this release's database definition, now that it is backed up.
   compose up -d --wait --wait-timeout 120 postgres || die "postgres did not become healthy"
-  "$backup" "$sha" || die "backup was not verified; migrations were not run"
   log "running migrations"
   compose --profile migrate run --rm migrate || die "migrations failed; the new release was not started"
+  compose up -d --wait --wait-timeout 180 --remove-orphans || die "services did not become healthy"
 else
   ensure_image "$(image_ref api "$api")" no
   ensure_image "$(image_ref web "$web")" no
+  # An application rollback: only the api and web containers change. The
+  # database keeps its current container and schema whatever this older
+  # compose file says about it.
+  compose up -d --wait --wait-timeout 180 --no-deps api web || die "services did not become healthy"
 fi
 
-compose up -d --wait --wait-timeout 180 --remove-orphans || die "services did not become healthy"
 verify_running
 
 record ok

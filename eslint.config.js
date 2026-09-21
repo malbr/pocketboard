@@ -8,6 +8,8 @@ const nodeGlobals = {
   URL: "readonly",
   fetch: "readonly",
   Response: "readonly",
+  AbortController: "readonly",
+  AbortSignal: "readonly",
 };
 const browserGlobals = {
   document: "readonly",

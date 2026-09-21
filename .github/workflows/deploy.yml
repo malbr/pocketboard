@@ -1,10 +1,12 @@
 name: Deploy
 
-# Production deploy and rollback (issue #8, ADR 0006). Runs only when the
-# owner dispatches it, and waits for the owner's approval on the `production`
-# Environment before it can read the deploy key. The key reaches one
-# forced-command SSH account that accepts only `deploy`, `rollback`, and
-# `status` requests; everything else happens in the root-owned VPS script.
+# Production deploy and rollback (issue #8, ADR 0006, ADR 0007). Runs only when
+# the owner dispatches it, and waits for the owner's approval on the
+# `production` Environment before it can read the deploy key. The key reaches
+# one forced-command SSH account that accepts only `deploy`, `rollback`, and
+# `status` requests; everything else happens in the root-owned VPS script,
+# which also refuses a deploy or rollback the owner has not authorized on the
+# host itself (docs/deployment.md, "Authorizing a deploy or rollback").
 on:
   workflow_dispatch:
     inputs:

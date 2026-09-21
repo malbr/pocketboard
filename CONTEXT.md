@@ -37,7 +37,11 @@ the initial POC.
 - Deployment uses a forced-command SSH account and one root-owned allow-listed
   script. The account is not a member of the Docker group and has no sudo; it
   reaches root only by starting one polkit-allowed systemd unit (ADR 0006).
-- Rollback restarts an earlier application image and never changes the
+- The host refuses any deploy or rollback without the owner's single-use,
+  expiring authorization line naming its SHA and digests, so the SSH key alone
+  cannot change production (ADR 0007).
+- Every deploy backs up the database before anything changes it. Rollback
+  restarts only the earlier api and web images and never changes the
   database, so CI rejects destructive or rollback-incompatible migrations.
 - GitHub Environment stores only the restricted deployment key. Application and
   backup secrets stay in root-owned VPS files.

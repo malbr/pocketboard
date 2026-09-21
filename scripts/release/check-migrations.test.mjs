@@ -124,3 +124,101 @@ test("fails closed when it cannot prove what it checked", () => {
   assert.match(missing.stderr, /0001_b has no SQL file/);
   assert.equal(spawnSync(process.execPath, [script], { encoding: "utf8" }).status, 2);
 });
+
+// Counterexamples from the PR #29 review
+// (https://github.com/malbr/pocketboard/pull/29#issuecomment-5733203079).
+// Each one was accepted by the regex-based guard.
+const existingCards = `CREATE TABLE "cards" ("id" uuid PRIMARY KEY NOT NULL, "title" text NOT NULL);`;
+
+function assertRejectedAfter(history, sql, fragment) {
+  const result = run(migrations({ "0000_base": history, "0001_x": sql }));
+  assert.equal(result.status, 1, `expected rejection of: ${sql}\n${result.stdout}`);
+  assert.match(result.stderr, fragment);
+}
+
+test("a comment marker inside a literal cannot hide a statement", () => {
+  assertRejected(`DO $$ BEGIN RAISE NOTICE '--'; DROP TABLE cards; END $$;`, /DO block/);
+  assertRejected(`CREATE TABLE "n" ("b" text DEFAULT '--');
+DROP TABLE cards;`, /DROP/);
+  assertRejected(`CREATE TABLE "n" ("b" text DEFAULT '/*');
+DROP TABLE cards; -- */`, /DROP/);
+});
+
+test("dynamic SQL and data changes inside DO blocks or CTEs are rejected", () => {
+  assertRejected(`DO $$ BEGIN EXECUTE 'DROP TABLE cards'; END $$;`, /DO block/);
+  assertRejected(`DO $$ BEGIN UPDATE cards SET title = ''; END $$;`, /DO block/);
+  assertRejected(`DO $body$ BEGIN
+ ALTER TABLE "cards" ADD COLUMN "n" text;
+ PERFORM pg_sleep(1);
+EXCEPTION WHEN duplicate_object THEN null;
+END $body$;`, /DO block/);
+  assertRejected(`WITH gone AS (DELETE FROM cards RETURNING id) SELECT count(*) FROM gone;`, /unsupported statement/);
+  assertRejected(`WITH x AS (UPDATE cards SET title = '' RETURNING id) SELECT 1;`, /unsupported statement/);
+  assertRejected(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity;`, /unsupported statement/);
+  assertRejected(`CREATE FUNCTION f() RETURNS void AS $$ DELETE FROM cards $$ LANGUAGE sql;`, /unsupported statement/);
+});
+
+test("the optional COLUMN keyword does not bypass column rules", () => {
+  assertRejectedAfter(existingCards, `ALTER TABLE cards ALTER title TYPE varchar(20);`, /column type/);
+  assertRejectedAfter(existingCards, `ALTER TABLE cards ALTER title SET DATA TYPE varchar(20);`, /column type/);
+  assertRejectedAfter(existingCards, `ALTER TABLE cards ADD owner text NOT NULL;`, /NOT NULL without a DEFAULT/);
+  assertRejectedAfter(existingCards, `ALTER TABLE cards ALTER title DROP DEFAULT;`, /unsupported ALTER TABLE action/);
+});
+
+test("a DEFAULT on one added column does not exempt another", () => {
+  assertRejectedAfter(
+    existingCards,
+    `ALTER TABLE cards ADD COLUMN a text DEFAULT 'x', ADD COLUMN b text NOT NULL;`,
+    /NOT NULL without a DEFAULT: .*\bb\b/,
+  );
+  assertRejectedAfter(existingCards, `ALTER TABLE cards ADD COLUMN b text DEFAULT NULL NOT NULL;`, /NOT NULL without a DEFAULT/);
+});
+
+test("CREATE TABLE IF NOT EXISTS on an existing table does not make it new", () => {
+  assertRejectedAfter(
+    existingCards,
+    `CREATE TABLE IF NOT EXISTS cards (id uuid);
+ALTER TABLE cards ADD COLUMN owner text NOT NULL;`,
+    /already exists/,
+  );
+  assertRejectedAfter(
+    existingCards,
+    `CREATE TABLE IF NOT EXISTS cards (id uuid);
+ALTER TABLE cards ADD COLUMN owner text NOT NULL;`,
+    /NOT NULL without a DEFAULT/,
+  );
+});
+
+test("schema and quoted case distinguish relations", () => {
+  assertRejectedAfter(
+    existingCards,
+    `CREATE TABLE archive.cards (id uuid);
+ALTER TABLE public.cards ADD COLUMN owner text NOT NULL;`,
+    /NOT NULL without a DEFAULT/,
+  );
+  assertRejectedAfter(
+    existingCards,
+    `CREATE TABLE "Cards" (id uuid);
+ALTER TABLE cards ADD CONSTRAINT c CHECK (length(title) < 5);`,
+    /constraint/,
+  );
+  assertAccepted(`CREATE TABLE "Labels" ("id" uuid);
+ALTER TABLE "Labels" ADD COLUMN "name" text NOT NULL;`);
+});
+
+test("column constraints added to an existing table are rejected", () => {
+  assertRejectedAfter(existingCards, `ALTER TABLE cards ADD COLUMN code text UNIQUE;`, /constraint/);
+  assertRejectedAfter(existingCards, `ALTER TABLE cards ADD COLUMN n int CHECK (n > 0);`, /constraint/);
+});
+
+test("unterminated literals and comments fail closed", () => {
+  assertRejected(`CREATE TABLE "n" ("b" text DEFAULT 'oops);`, /unterminated/);
+  assertRejected(`/* never closed
+CREATE TABLE "n" ("b" text);`, /unterminated/);
+  assertRejected(`DO $$ BEGIN NULL; END;`, /unterminated/);
+});
+
+test("E-string escapes are respected", () => {
+  assertRejected(String.raw`CREATE TABLE "n" ("b" text DEFAULT E'it\'s');
+DROP TABLE cards;`, /DROP/);
+});
