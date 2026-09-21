@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Database restore (issue #8). Installed root-owned at
+# /usr/local/sbin/pocketboard-restore. Run by hand as root, only after the
+# restore's own human approval gate; the deploy account cannot reach it.
+#
+#   pocketboard-restore <restic snapshot id>
+#
+# 1. Read the snapshot's dump and prove it is a readable pg_dump archive.
+# 2. Restore it into a new, empty database, stopping at the first error and
+#    rolling the whole restore back.
+# 3. Verify the restored database: cards are readable and the Drizzle
+#    migration ledger is not empty.
+# 4. Only then stop api and web, and swap both database names in one
+#    transaction. The replaced database is kept, renamed.
+# Any failure before step 4 exits non-zero with the live database and the
+# running application untouched. A failed swap restarts the stopped
+# application. `pg_restore --clean` into the live database is never used: it
+# drops only objects in the dump and leaves newer ones behind.
+set -euo pipefail
+umask 077
+
+env_file="${POCKETBOARD_BACKUP_ENV:-/etc/pocketboard/backup.env}"
+tmp_root="${POCKETBOARD_BACKUP_TMP:-/var/lib/pocketboard/backup-tmp}"
+owner_uid="${POCKETBOARD_EXPECTED_OWNER_UID:-0}"
+project="${POCKETBOARD_COMPOSE_PROJECT:-pocketboard}"
+export RESTIC_CACHE_DIR="${RESTIC_CACHE_DIR:-/var/cache/pocketboard-restic}"
+
+log() { printf '%s restore: %s\n' "$(date -u +%FT%TZ)" "$*"; }
+die() { log "FAILED: $*" >&2; exit 1; }
+
+if [[ $# -ne 1 || ! "$1" =~ ^[0-9a-f]{8,64}$ ]]; then
+  echo "usage: pocketboard-restore <restic snapshot id>" >&2
+  exit 2
+fi
+snapshot="$1"
+
+[[ -f "$env_file" ]] || die "$env_file is missing"
+[[ "$(stat -c '%u %a' "$env_file")" == "$owner_uid 600" ]] \
+  || die "$env_file must be owned by uid $owner_uid with mode 600"
+set -a
+# shellcheck disable=SC1090
+. "$env_file"
+set +a
+
+restic cat config > /dev/null || die "the Restic repository is unreachable or not initialised"
+
+# Plain assignments, so a failed docker call stops the script under set -e.
+containers() {
+  docker ps --quiet --filter "label=com.docker.compose.project=$project" \
+    --filter "label=com.docker.compose.service=$1" --filter status=running
+}
+pg="$(containers postgres)"
+[[ -n "$pg" && "$pg" != *$'\n'* ]] || die "expected exactly one running pocketboard postgres container"
+psql() { docker exec -i "$pg" psql -U pocketboard -X -q -v ON_ERROR_STOP=1 "$@"; }
+
+mkdir -p "$tmp_root"
+chmod 700 "$tmp_root"
+work="$(mktemp -d "$tmp_root/restore.XXXXXX")"
+trap 'rm -rf "$work"' EXIT
+dump="$work/pocketboard.dump"
+
+restic dump "$snapshot" /pocketboard.dump > "$dump" || die "cannot read /pocketboard.dump from snapshot $snapshot"
+[[ "$(head -c 5 "$dump")" == PGDMP ]] || die "the snapshot does not hold a custom-format pg_dump archive"
+docker exec -i "$pg" pg_restore --list < "$dump" > /dev/null || die "pg_restore cannot read the dump"
+
+psql -d postgres -c 'DROP DATABASE IF EXISTS pocketboard_restore' \
+  -c 'CREATE DATABASE pocketboard_restore TEMPLATE template0' \
+  || die "cannot create the empty pocketboard_restore database"
+docker exec -i "$pg" pg_restore -U pocketboard -d pocketboard_restore --exit-on-error --single-transaction \
+  --no-owner < "$dump" || die "the restore failed and was rolled back; the live database is unchanged"
+
+cards="$(psql -d pocketboard_restore -tAc 'SELECT count(*) FROM cards')" \
+  || die "the restored database has no readable cards table"
+[[ "$cards" =~ ^[0-9]+$ ]] || die "unexpected cards count: $cards"
+ledger="$(psql -d pocketboard_restore -tAc \
+  "SELECT count(*) || ' ' || coalesce(max(created_at)::text, '') FROM drizzle.__drizzle_migrations")" \
+  || die "the restored database has no Drizzle migration ledger"
+[[ "$ledger" =~ ^([1-9][0-9]*)\ ([0-9]+)$ ]] || die "the restored Drizzle migration ledger is empty"
+migrations="${BASH_REMATCH[1]}"
+last_when="${BASH_REMATCH[2]}"
+log "verified pocketboard_restore: $cards cards, $migrations migrations, last migration when $last_when"
+
+# Renaming a database needs every session on it closed.
+stopped=()
+for service in web api; do
+  ids="$(containers "$service")"
+  for id in $ids; do
+    docker stop "$id" > /dev/null
+    stopped+=("$id")
+  done
+done
+
+replaced="pocketboard_before_restore_$(date -u +%Y%m%dT%H%M%SZ)"
+if ! psql -d postgres -c "BEGIN; ALTER DATABASE pocketboard RENAME TO $replaced; ALTER DATABASE pocketboard_restore RENAME TO pocketboard; COMMIT;"; then
+  for id in "${stopped[@]}"; do docker start "$id" > /dev/null || true; done
+  die "the swap failed and was rolled back; the live database is unchanged and api and web were restarted"
+fi
+log "swapped: pocketboard is the restored database; the replaced one is $replaced"
+log "api and web are stopped. Start the release whose migration journal ends at when $last_when with an authorized rollback"

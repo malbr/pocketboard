@@ -8,11 +8,18 @@ import { clearTimeout, setTimeout } from "node:timers";
  * `/health` is deliberately exempt from rate limiting (see `rate-limit.ts`),
  * so the probe must not turn a request flood into a query flood: concurrent
  * callers share one in-flight check, and a result is reused for `cacheMs`.
+ *
+ * A check that times out is aborted but still owned until it settles. While
+ * it is outstanding no new check starts and callers get `false`, so a stalled
+ * database can never accumulate more than one check.
  */
 export type HealthProbe = () => Promise<boolean>;
 
+/** Receives an AbortSignal that fires when the check exceeds its timeout. */
+export type DatabaseCheck = (signal: AbortSignal) => Promise<unknown>;
+
 export interface DatabaseProbeOptions {
-  /** A check slower than this counts as a failure. */
+  /** A check slower than this counts as a failure and is aborted. */
   timeoutMs?: number;
   /** How long a result is reused before the database is asked again. */
   cacheMs?: number;
@@ -22,38 +29,60 @@ export interface DatabaseProbeOptions {
 }
 
 export function createDatabaseProbe(
-  check: () => Promise<unknown>,
+  check: DatabaseCheck,
   { timeoutMs = 2_000, cacheMs = 1_000, now = Date.now, onFailure = () => {} }: DatabaseProbeOptions = {},
 ): HealthProbe {
   let last: { healthy: boolean; at: number } | undefined;
-  let inFlight: Promise<boolean> | undefined;
+  let verdict: Promise<boolean> | undefined;
+  let outstanding = false;
 
-  async function run(): Promise<boolean> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`database check exceeded ${timeoutMs} ms`)), timeoutMs);
-      timer.unref?.();
-    });
+  function run(): Promise<boolean> {
+    const controller = new AbortController();
+    let work: Promise<unknown>;
     try {
-      await Promise.race([check(), timeout]);
-      return true;
+      work = Promise.resolve(check(controller.signal));
     } catch (error) {
-      onFailure(error);
-      return false;
-    } finally {
-      clearTimeout(timer);
+      work = Promise.reject(error);
     }
+    outstanding = true;
+    const release = () => {
+      outstanding = false;
+    };
+    work.then(release, release);
+
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        controller.abort();
+        onFailure(new Error(`database check exceeded ${timeoutMs} ms`));
+        resolve(false);
+      }, timeoutMs);
+      timer.unref?.();
+      work.then(
+        () => {
+          clearTimeout(timer);
+          resolve(true);
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          // After a timeout the rejection is the abort itself, already reported.
+          if (!controller.signal.aborted) onFailure(error);
+          resolve(false);
+        },
+      );
+    });
   }
 
   return () => {
     if (last && now() - last.at < cacheMs) {
       return Promise.resolve(last.healthy);
     }
-    inFlight ??= run().then((healthy) => {
+    if (verdict) return verdict;
+    if (outstanding) return Promise.resolve(false);
+    verdict = run().then((healthy) => {
       last = { healthy, at: now() };
-      inFlight = undefined;
+      verdict = undefined;
       return healthy;
     });
-    return inFlight;
+    return verdict;
   };
 }

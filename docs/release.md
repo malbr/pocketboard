@@ -58,7 +58,7 @@ else. Every other job has `contents: read` only.
 | Static analysis | CodeQL `security-extended`, JavaScript/TypeScript and Actions | any result, of any severity |
 | Images | Trivy (digest-pinned), via `scan-image.sh` | any fixable high or critical vulnerability, or any embedded secret |
 | API contract | `npm run openapi:check` | a generated OpenAPI document that differs from the committed one |
-| Migrations | `check-migrations.mjs` | any `DROP`, `TRUNCATE`, `DELETE`, `UPDATE`, `RENAME`, column type change, or a new `NOT NULL`, constraint, or unique index on an existing table |
+| Migrations | `check-migrations.mjs` | any `DROP`, `TRUNCATE`, `DELETE`, `UPDATE`, `RENAME`, column type change, or a new `NOT NULL`, constraint, or unique index on an existing table; a changed column default, or a new column default other than a constant, `now()` or `gen_random_uuid()`; an identifier over 63 bytes; any statement outside a few additive shapes |
 | Compose | `check-production-compose.sh` plus a smoke run | a public database port, a non-internal backend, a missing limit or health check, or an unpinned image |
 
 No check has an ignore file, baseline, or allowlist. An exception needs a

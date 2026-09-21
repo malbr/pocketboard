@@ -82,4 +82,39 @@ pg_container="$(compose ps -q postgres)"
 bindings="$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$pg_container")"
 [[ "$bindings" == "{}" || "$bindings" == "null" ]] || fail "postgres publishes host ports: $bindings"
 
+# Prolonged database failure (PR #29 review, finding 4). PostgreSQL is frozen
+# for many probe timeouts: health must answer 503 every time, the API must not
+# restart, and health must recover once the database returns with at most one
+# health connection left open.
+api_container="$(compose ps -q api)"
+restarts="$(docker inspect --format '{{.RestartCount}}' "$api_container")"
+health_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:$port/api/health" || true; }
+docker pause "$pg_container" > /dev/null
+sleep 2 # outlast the cached healthy result
+probes=0
+outage_end=$((SECONDS + ${SMOKE_DB_OUTAGE_SECONDS:-20}))
+while (( SECONDS < outage_end )); do
+  code="$(health_code)"
+  [[ "$code" == 503 ]] || { docker unpause "$pg_container" > /dev/null; fail "health returned $code while the database was frozen"; }
+  probes=$((probes + 1))
+done
+docker unpause "$pg_container" > /dev/null
+recovered=no
+for _ in $(seq 30); do
+  [[ "$(health_code)" == 200 ]] && { recovered=yes; break; }
+  sleep 1
+done
+[[ "$recovered" == yes ]] || fail "health did not recover after the database returned"
+[[ "$(docker inspect --format '{{.RestartCount}}' "$api_container")" == "$restarts" ]] || fail "the API restarted during the outage"
+health_connections() {
+  docker exec "$pg_container" psql -U pocketboard -d pocketboard -tAc \
+    "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'pocketboard-health'"
+}
+for _ in $(seq 20); do
+  (( $(health_connections) <= 1 )) && break
+  sleep 1
+done
+(( $(health_connections) <= 1 )) || fail "$(health_connections) health connections remain open after the outage"
+echo "database outage: $probes health probes answered 503; recovered; no restart"
+
 echo "production compose smoke test passed"

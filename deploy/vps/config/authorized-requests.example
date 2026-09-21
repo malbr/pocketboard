@@ -1,0 +1,21 @@
+# /etc/pocketboard/authorized-requests (root:root 0600). The owner's host-side
+# approval for each deploy or rollback (ADR 0007). Only root edits this file;
+# pocketboard-deploy reads it and refuses any deploy or rollback without a
+# matching line. It holds no secrets.
+#
+# One line per approved action, added by the owner as root after the matching
+# GitHub gate is approved:
+#
+#   <expires, UTC> <action> <sha> <api digest> <web digest>
+#
+#   2026-10-01T18:00:00Z deploy 0123456789abcdef0123456789abcdef01234567 sha256:<64 hex> sha256:<64 hex>
+#   2026-10-01T18:00:00Z rollback 89abcdef0123456789abcdef0123456789abcdef sha256:<64 hex> sha256:<64 hex>
+#
+# - Copy the SHA and digests from the gate, which takes them from the commit's
+#   CI release record. A rollback names the digests recorded for that release
+#   in /var/lib/pocketboard/releases.log.
+# - The expiry must be in the future and at most 7 days away.
+# - Each line authorizes one run. pocketboard-deploy records a used line in
+#   /var/lib/pocketboard/authorizations.used; to repeat an action, add a new
+#   line with a different expiry.
+# - Lines that do not match this format are ignored.

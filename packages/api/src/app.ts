@@ -10,7 +10,7 @@ import { PostgresSessionStore } from "./auth/session-store";
 import type { AuthConfig } from "./config/auth-config";
 import type { Database } from "./db/client";
 import { registerErrorHandler } from "./errors";
-import { createDatabaseProbe } from "./health/database-probe";
+import { createDatabaseProbe, type DatabaseCheck } from "./health/database-probe";
 import { registerRateLimit } from "./rate-limit";
 import { registerAuthRoutes } from "./routes/auth";
 import { registerCardRoutes } from "./routes/cards";
@@ -34,6 +34,12 @@ export interface AppDependencies {
    * composition root turns it on, so no test leaves a timer behind.
    */
   sessionCleanup?: { intervalMs: number; timers?: CleanupTimers };
+  /**
+   * The query behind `GET /health`. Production passes a check on its own
+   * connection (`postgres-health-check.ts`) so a stalled database cannot tie
+   * up the application pool; tests default to the shared client.
+   */
+  databaseCheck?: DatabaseCheck;
 }
 
 export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> {
@@ -77,7 +83,7 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
 
   registerHealthRoutes(
     app,
-    createDatabaseProbe(() => db.execute(sql`select 1`), {
+    createDatabaseProbe(deps.databaseCheck ?? (() => db.execute(sql`select 1`)), {
       onFailure: (error) => app.log.warn({ err: error }, "health check could not reach the database"),
     }),
   );

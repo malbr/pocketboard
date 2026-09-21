@@ -3,6 +3,7 @@ import { createGitHubOAuthProvider } from "./auth/github-oauth";
 import { loadAuthConfig } from "./config/auth-config";
 import { createDbClient } from "./db/client";
 import { serializeErrorForLog } from "./errors";
+import { createPostgresHealthCheck } from "./health/postgres-health-check";
 import type { FastifyInstance } from "fastify";
 
 /**
@@ -26,9 +27,11 @@ export async function createProductionApp(
   const connectionString =
     env.DATABASE_URL ?? "postgres://pocketboard:pocketboard@127.0.0.1:5432/pocketboard";
   const { db, queryClient } = createDbClient(connectionString);
+  const healthCheck = createPostgresHealthCheck(connectionString);
 
   const app = await buildApp({
     db,
+    databaseCheck: healthCheck.check,
     authConfig,
     identityProvider: createGitHubOAuthProvider(authConfig),
     // Without this the API is silent about its own failures, and the generic
@@ -47,6 +50,7 @@ export async function createProductionApp(
       // no timer can fire against a connection that is already gone.
       await app.close();
       await queryClient.end();
+      await healthCheck.close();
     },
   };
 }

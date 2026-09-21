@@ -60,7 +60,10 @@ local_sum="$(sha256sum "$dump" | cut -d' ' -f1)"
 bytes="$(stat -c %s "$dump")"
 log "local dump verified: $bytes bytes, $(grep -c '^[0-9]' "$work/toc" || true) archive entries, sha256 $local_sum"
 
-name="pocketboard-$(date -u +%Y%m%dT%H%M%SZ)-$sha.dump"
+# One stable path for every snapshot: Restic's retention groups by host and
+# path by default, and a per-run name would give each snapshot its own group.
+# The release is recorded in a tag and the time in the snapshot itself.
+name="pocketboard.dump"
 restic backup --json --host pocketboard --tag pocketboard --tag pre-deploy --tag "sha-$sha" \
   --stdin --stdin-filename "$name" < "$dump" > "$work/backup.json"
 snapshot="$(grep -o '"snapshot_id":"[0-9a-f]*"' "$work/backup.json" | cut -d'"' -f4 | tail -n 1)"
@@ -70,8 +73,9 @@ remote_sum="$(restic dump "$snapshot" "/$name" | sha256sum | cut -d' ' -f1)"
 [[ "$remote_sum" == "$local_sum" ]] || die "snapshot $snapshot does not match the local dump"
 
 # Retention is housekeeping; a verified snapshot already exists, so a failure
-# here is reported without blocking the deploy.
-restic forget --host pocketboard --tag pocketboard --keep-last 5 \
+# here is reported without blocking the deploy. Grouping by host alone keeps
+# the per-release tags from splitting snapshots into groups of one.
+restic forget --host pocketboard --tag pocketboard --group-by host --keep-last 5 \
   --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --prune > /dev/null \
   || log "WARNING: retention (restic forget --prune) failed; the new snapshot is unaffected"
 

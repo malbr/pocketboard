@@ -10,7 +10,9 @@ Accepted
 
 ## Superseded records
 
-None.
+None. Amended by [ADR 0007](0007-host-authorization-and-database-boundary.md):
+host-side authorization, the backup-before-database-change boundary, and
+application-only rollback.
 
 ## Context
 
@@ -48,8 +50,10 @@ running.
 ## Consequences
 
 - The deploy account has no sudo and no Docker group, and cannot choose what
-  runs as root. A stolen key can only deploy or roll back CI-green `main`
-  releases, which still waits for Environment approval.
+  runs as root. Correction (PR #29 review): the Environment gates only the
+  workflow's use of the key. A copied key could send a valid request over SSH
+  directly, without that approval. ADR 0007 adds the host-side authorization
+  that closes this gap.
 - GitHub-hosted runner addresses vary, so the key cannot be restricted by
   source address.
 - A deploy depends on GitHub (compose file) and R2 (backup). A rollback
