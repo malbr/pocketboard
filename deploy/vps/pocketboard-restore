@@ -14,10 +14,11 @@
 #    transaction. The replaced database is kept, renamed.
 # Any failure before step 4 exits non-zero with the live database and the
 # running application untouched. A failure while stopping the application
-# restarts what was stopped. After an error from the swap, PostgreSQL is asked
-# what happened: a rolled-back swap restarts the application, a committed one
-# counts as swapped, and an unknown outcome leaves the application stopped.
-# Every failed restart is reported. `pg_restore --clean` into the live
+# restarts what was stopped, and every failed restart is reported. Once the
+# swap has been sent, nothing restarts automatically: after an error from it
+# the application stays stopped, unless PostgreSQL shows the swap committed,
+# and the owner decides using the runbook. Every database call from the name
+# check onwards has a deadline. `pg_restore --clean` into the live
 # database is never used: it drops only objects in the dump and leaves newer
 # ones behind.
 set -euo pipefail
@@ -27,7 +28,9 @@ env_file="${POCKETBOARD_BACKUP_ENV:-/etc/pocketboard/backup.env}"
 tmp_root="${POCKETBOARD_BACKUP_TMP:-/var/lib/pocketboard/backup-tmp}"
 owner_uid="${POCKETBOARD_EXPECTED_OWNER_UID:-0}"
 project="${POCKETBOARD_COMPOSE_PROJECT:-pocketboard}"
-swap_wait="${POCKETBOARD_SWAP_WAIT:-30}"
+# Deadlines, in seconds, for each database call around the swap.
+check_timeout="${POCKETBOARD_CHECK_TIMEOUT:-10}"
+swap_timeout="${POCKETBOARD_SWAP_TIMEOUT:-120}"
 export RESTIC_CACHE_DIR="${RESTIC_CACHE_DIR:-/var/cache/pocketboard-restic}"
 
 log() { printf '%s restore: %s\n' "$(date -u +%FT%TZ)" "$*"; }
@@ -79,17 +82,20 @@ restart_stopped() {
 
 # A failure (or Ctrl-C, or a closed session) while stopping the application
 # restarts what was stopped: nothing has been swapped yet, so the previous
-# release still matches the live database. During the swap nothing is
-# restarted, because the outcome is not known.
+# release still matches the live database. Once the swap has been sent,
+# nothing restarts automatically. Recovery runs first and never stops at a
+# failing step, so a failed cleanup cannot prevent it.
 on_exit() {
   local status=$?
-  rm -rf "$work"
-  (( status == 0 )) && return 0
-  case "$phase" in
-    stopping) restart_stopped || true ;;
-    swapping) log "interrupted during the swap, whose outcome was not checked; api and web are left stopped." \
-      "Check which database is live before starting anything" >&2 ;;
-  esac
+  set +e
+  if (( status != 0 )); then
+    case "$phase" in
+      stopping) restart_stopped ;;
+      swapping) log "interrupted during the swap; api and web are left stopped." \
+        "Follow the runbook's steps for a swap error before starting anything" >&2 ;;
+    esac
+  fi
+  rm -rf "$work" || log "WARNING: could not remove $work; delete it by hand" >&2
 }
 
 mkdir -p "$tmp_root"
@@ -121,11 +127,19 @@ migrations="${BASH_REMATCH[1]}"
 last_when="${BASH_REMATCH[2]}"
 log "verified pocketboard_restore: $cards cards, $migrations migrations, last migration when $last_when"
 
-# Lower case only: PostgreSQL folds an unquoted name, and the outcome check
-# below looks the name up exactly. It must be new, so that the names after a
-# swap error show which way it went.
+# One database call with a deadline, so no check can hang the run. A call cut
+# off by the deadline fails like any other.
+psql_within() {
+  local seconds="$1"
+  shift
+  timeout --kill-after=5 "$seconds" docker exec -i "$pg" psql -U pocketboard -X -q -v ON_ERROR_STOP=1 "$@"
+}
+
+# Lower case only: PostgreSQL folds an unquoted name, and the check after a
+# swap error looks the name up exactly. It must be new, so that a committed
+# swap can be recognised.
 replaced="pocketboard_before_restore_$(date -u +%Y%m%d_%H%M%S)"
-taken="$(psql -d postgres -tAc "SELECT count(*) FROM pg_database WHERE datname = '$replaced'")" \
+taken="$(psql_within "$check_timeout" -d postgres -tAc "SELECT count(*) FROM pg_database WHERE datname = '$replaced'")" \
   || die "cannot list the databases; nothing was stopped"
 [[ "$taken" == 0 ]] || die "a database named $replaced already exists; nothing was stopped"
 
@@ -140,47 +154,30 @@ for id in $web_ids $api_ids; do
   docker stop "$id" > /dev/null || die "cannot stop $id; nothing was swapped"
 done
 
-# An error from the swap command does not prove the swap rolled back: the
-# server can commit it after the client has lost its response. Only the
-# server can say, once the swap's session has ended, which names exist.
-swap_session=pocketboard-restore-swap
-swap_outcome() {
-  local attempt active="" names
-  for ((attempt = 0; attempt < swap_wait; attempt++)); do
-    active="$(psql -d postgres -tAc \
-      "SELECT count(*) FROM pg_stat_activity WHERE application_name = '$swap_session'")" || { echo unknown; return; }
-    [[ "$active" == 0 ]] && break
-    sleep 1
-  done
-  [[ "$active" == 0 ]] || { echo unknown; return; }
-  names="$(psql -d postgres -tAc "SELECT string_agg(datname, ' ' ORDER BY datname COLLATE \"C\") FROM pg_database
-    WHERE datname IN ('pocketboard', 'pocketboard_restore', '$replaced')")" || { echo unknown; return; }
-  case "$names" in
-    "pocketboard pocketboard_restore") echo rolled-back ;;
-    "pocketboard $replaced") echo swapped ;;
-    *) echo unknown ;;
-  esac
-}
-
+# After an error from the swap command, the script cannot prove the swap will
+# not still commit: the server can commit after the client lost its response,
+# and a command Docker accepted can reach PostgreSQL late. So it never
+# restarts anything once the swap has been sent. It reads the names once,
+# with a deadline, and leaves the decision to the owner (see the runbook).
 phase=swapping
-if docker exec -i -e "PGAPPNAME=$swap_session" "$pg" psql -U pocketboard -X -q -v ON_ERROR_STOP=1 -d postgres \
+if timeout --kill-after=5 "$swap_timeout" docker exec -i -e PGAPPNAME=pocketboard-restore-swap "$pg" \
+  psql -U pocketboard -X -q -v ON_ERROR_STOP=1 -d postgres \
   -c "BEGIN; ALTER DATABASE pocketboard RENAME TO $replaced; ALTER DATABASE pocketboard_restore RENAME TO pocketboard; COMMIT;"; then
-  outcome=swapped
+  phase=done
 else
-  outcome="$(swap_outcome)"
-  [[ "$outcome" != swapped ]] || log "WARNING: the swap command reported an error, but PostgreSQL shows the swap committed" >&2
+  phase=done
+  names="$(psql_within "$check_timeout" -d postgres -tAc "SELECT string_agg(datname, ' ' ORDER BY datname COLLATE \"C\")
+    FROM pg_database WHERE datname IN ('pocketboard', 'pocketboard_restore', '$replaced')")" || names=""
+  case "$names" in
+    "pocketboard $replaced")
+      log "WARNING: the swap command reported an error, but PostgreSQL shows the swap committed" >&2 ;;
+    "pocketboard pocketboard_restore")
+      die "the swap reported an error. PostgreSQL still shows the original names, but a delayed swap cannot be" \
+        "ruled out; api and web are left stopped. Follow the runbook's steps for a swap error" ;;
+    *)
+      die "the swap reported an error and its outcome could not be established; api and web are left stopped." \
+        "Follow the runbook's steps for a swap error" ;;
+  esac
 fi
-phase=done
-case "$outcome" in
-  swapped) ;;
-  rolled-back)
-    if restart_stopped; then
-      die "the swap failed and PostgreSQL shows it rolled back; the live database is unchanged and api and web were restarted"
-    fi
-    die "the swap failed and PostgreSQL shows it rolled back; the live database is unchanged, but api and web did not all restart" ;;
-  *)
-    die "the swap reported an error and its outcome could not be established; api and web are left stopped." \
-      "Check which database is live (SELECT datname FROM pg_database) before starting anything" ;;
-esac
 log "swapped: pocketboard is the restored database; the replaced one is $replaced"
 log "api and web are stopped. Start the release whose migration journal ends at when $last_when with an authorized rollback"

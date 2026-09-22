@@ -170,10 +170,17 @@ psql -d postgres -c "DROP DATABASE unmigrated;"
 restore "$work/unmigrated.dump"
 check "a dump that fails verification is never swapped in" 'untouched && [[ $output == *"ledger"* ]]'
 
+# PR #34 review, P1: unchanged names after a swap error do not prove the swap
+# cannot still commit, so the script leaves the application stopped.
 restore "$work/restore.dump" hold
-check "a swap whose second rename fails is shown to have rolled back and restarts the application" \
-  'untouched && [[ $output == *"swap failed"* && $output == *"rolled back"* ]] &&[[ "$(psql -d postgres -tAc "SELECT count(*) FROM pg_database WHERE datname = '"'"'pocketboard_restore'"'"'")" == 1 ]]'
+check "a swap whose second rename fails leaves the live database unchanged and the application stopped" \
+  '(( code != 0 )) && ! swapped && [[ "$(live_cards)" == 3 ]] && ! api_running &&
+   [[ $output == *"cannot be ruled out"* && $output == *"left stopped"* ]] &&
+   [[ "$(psql -d postgres -tAc "SELECT count(*) FROM pg_database WHERE datname = '"'"'pocketboard_restore'"'"'")" == 1 ]]'
 psql -d postgres -tAc "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'pocketboard_restore'" > /dev/null
+# The owner's decision, per the runbook: the original database is live, so
+# the current release is started again.
+docker start "$api" > /dev/null
 
 restore "$work/restore.dump"
 check "a verified restore succeeds" '(( code == 0 )) && [[ $output == *"swapped"* ]]'

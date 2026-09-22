@@ -19,15 +19,17 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin"
 
-# Each mode fails exactly one step. After a swap error the script asks
-# PostgreSQL whether the swap's session has ended and which database names
-# exist; the swap-* modes answer as a rolled-back swap, a committed swap whose
-# response was lost, a server that cannot be asked, or a session that never
-# ends.
+# FAKE_MODE holds one or more space-separated modes, each failing one step.
+# After a swap error the script reads the database names once; the swap-*
+# modes answer as unchanged names (a rolled-back swap, or one still pending),
+# a committed swap whose response was lost, or a server that cannot be asked.
+# The *-stalls and swap-hangs modes never answer.
 cat > "$work/bin/docker" <<'FAKE'
 #!/usr/bin/env bash
 printf 'docker %s\n' "$*" >> "$FAKE_CALLS"
-fail() { [[ "$FAKE_MODE" == "$1" ]] && exit 1; return 0; }
+has() { [[ " $FAKE_MODE " == *" $1 "* ]]; }
+fail() { has "$1" && exit 1; return 0; }
+stall() { has "$1" && exec sleep 30; return 0; }
 replaced() { grep -o 'pocketboard_before_restore_[0-9_]*' "$FAKE_CALLS" | head -n 1; }
 case "$1" in
   ps)
@@ -41,7 +43,7 @@ case "$1" in
     fail stop-fails
     [[ "$2" == apicid ]] && fail api-stop-fails
     # The operator presses Ctrl-C, or the session ends, just after web stopped.
-    [[ "$FAKE_MODE" == interrupted && "$2" == webcid ]] && kill -TERM "$PPID"
+    has interrupted && [[ "$2" == webcid ]] && kill -TERM "$PPID"
     echo "$2" ;;
   start) fail restart-fails; echo "$2" ;;
   exec)
@@ -53,15 +55,19 @@ case "$1" in
       *__drizzle_migrations*)
         fail no-ledger
         if [[ "$FAKE_MODE" == empty-ledger ]]; then echo "0 "; else echo "2 1726000000000"; fi ;;
-      *"RENAME TO"*) [[ "$FAKE_MODE" == swap-* || "$FAKE_MODE" == restart-fails ]] && exit 1; exit 0 ;;
-      *pg_stat_activity*)
-        fail swap-unknown
-        if [[ "$FAKE_MODE" == swap-busy ]]; then echo 1; else echo 0; fi ;;
+      *"RENAME TO"*)
+        stall swap-hangs
+        [[ "$FAKE_MODE" == swap-* ]] && exit 1
+        exit 0 ;;
+      # A pending swap has not reached PostgreSQL yet, so no session shows it.
+      *pg_stat_activity*) echo 0 ;;
       *"count(*) FROM pg_database"*)
-        if [[ "$FAKE_MODE" == name-taken ]]; then echo 1; else echo 0; fi ;;
+        stall precheck-stalls
+        if has name-taken; then echo 1; else echo 0; fi ;;
       *pg_database*)
+        stall check-stalls
         fail swap-unknown
-        if [[ "$FAKE_MODE" == swap-lost ]]; then echo "pocketboard $(replaced)"; else echo "pocketboard pocketboard_restore"; fi ;;
+        if has swap-lost; then echo "pocketboard $(replaced)"; else echo "pocketboard pocketboard_restore"; fi ;;
       *psql*) ;;
       *) exit 99 ;;
     esac ;;
@@ -80,7 +86,13 @@ case "$1" in
   *) exit 99 ;;
 esac
 FAKE
-chmod +x "$work/bin/docker" "$work/bin/restic"
+# Temporary-file cleanup that fails, as on a full or read-only disk.
+cat > "$work/bin/rm" <<'FAKE'
+#!/usr/bin/env bash
+[[ " $FAKE_MODE " == *" cleanup-fails "* ]] && { echo "rm: simulated failure" >&2; exit 1; }
+exec /bin/rm "$@"
+FAKE
+chmod +x "$work/bin/docker" "$work/bin/restic" "$work/bin/rm"
 
 cat > "$work/backup.env" <<'ENV'
 RESTIC_REPOSITORY=s3:https://example.r2.cloudflarestorage.com/pocketboard-backups
@@ -90,17 +102,19 @@ AWS_SECRET_ACCESS_KEY=test-only-secret
 ENV
 chmod 600 "$work/backup.env"
 
-# run <mode> [args...]; sets code, output
+# run <mode> [args...]; sets code, output, elapsed (seconds)
 run() {
-  local mode="$1"
+  local mode="$1" started=$SECONDS
   shift
   : > "$work/calls"
-  rm -rf "$work/tmp"
+  /bin/rm -rf "$work/tmp"
   code=0
   output="$(env -i PATH="$work/bin:/usr/bin:/bin" FAKE_CALLS="$work/calls" FAKE_MODE="$mode" \
     POCKETBOARD_BACKUP_ENV="$work/backup.env" POCKETBOARD_BACKUP_TMP="$work/tmp" \
-    RESTIC_CACHE_DIR="$work/cache" POCKETBOARD_EXPECTED_OWNER_UID="$(id -u)" POCKETBOARD_SWAP_WAIT=1 \
+    RESTIC_CACHE_DIR="$work/cache" POCKETBOARD_EXPECTED_OWNER_UID="$(id -u)" \
+    POCKETBOARD_CHECK_TIMEOUT=1 POCKETBOARD_SWAP_TIMEOUT=1 \
     bash "$restore" "$@" 2>&1)" || code=$?
+  elapsed=$((SECONDS - started))
 }
 
 check() {
@@ -142,11 +156,15 @@ check "a failed application stop never swaps" '[[ $code == 1 ]] && ! renamed'
 
 restarted() { grep -q "^docker start $1\$" "$work/calls"; }
 
-run swap-fails "$snapshot"
-check "a swap shown to have rolled back restarts the stopped application and fails" \
-  '[[ $code == 1 && $output == *"rolled back"* && $output == *"unchanged"* ]] && restarted apicid && restarted webcid'
-check "the rollback is established from PostgreSQL, after the swap session ended" \
-  '(( $(line pg_stat_activity) < $(line string_agg) && $(line string_agg) < $(line "docker start") ))'
+never_restarted() { ! grep -q "^docker start" "$work/calls"; }
+
+# PR #34 review, P1: unchanged names do not prove a rollback. A swap command
+# that Docker accepted may still be on its way to PostgreSQL and commit after
+# the check. Once the swap has been sent, nothing restarts automatically.
+run swap-pending "$snapshot"
+check "unchanged names after a swap error never restart the application" \
+  '[[ $code == 1 && $output == *"left stopped"* && $output != *"were restarted"* ]] && never_restarted'
+check "the output says a delayed swap cannot be ruled out" '[[ $output == *"cannot be ruled out"* ]]'
 
 # PR #33 follow-up review, P1: an error from the swap command does not prove
 # the transaction rolled back. PostgreSQL may have committed both renames
@@ -154,13 +172,24 @@ check "the rollback is established from PostgreSQL, after the swap session ended
 run swap-lost "$snapshot"
 check "a committed swap whose response was lost is reported as swapped" \
   '[[ $code == 0 && $output == *"swapped"* && $output == *"WARNING"* && $output != *"unchanged"* ]]'
-check "a committed swap never restarts the previous application" '! grep -q "^docker start" "$work/calls"'
+check "a committed swap never restarts the previous application" never_restarted
 
-for mode in swap-unknown swap-busy; do
-  run "$mode" "$snapshot"
-  check "$mode: an unknown swap outcome leaves the application stopped and says so" \
-    '[[ $code == 1 && $output == *"could not be established"* && $output != *"unchanged"* ]] && ! grep -q "^docker start" "$work/calls"'
-done
+run swap-unknown "$snapshot"
+check "an outcome that cannot be read leaves the application stopped and says so" \
+  '[[ $code == 1 && $output == *"could not be established"* ]] && never_restarted'
+
+# PR #34 review, P2: every database call after the application stops has a
+# deadline. A stalled call counts as an unknown outcome and never hangs the
+# run with the application down.
+run "swap-hangs" "$snapshot"
+check "a swap command that hangs is cut off and leaves the application stopped" \
+  '[[ $code == 1 && $output == *"left stopped"* ]] && (( elapsed < 10 )) && never_restarted'
+run "swap-pending check-stalls" "$snapshot"
+check "a stalled outcome check is cut off and reported as unknown" \
+  '[[ $code == 1 && $output == *"could not be established"* ]] && (( elapsed < 10 )) && never_restarted'
+run precheck-stalls "$snapshot"
+check "a stalled check before the stop is cut off and stops nothing" \
+  '[[ $code == 1 ]] && (( elapsed < 10 )) && ! stopped && ! renamed'
 
 # PR #33 follow-up review, P2: a failure part-way through stopping the
 # application must not leave it down, and a failed restart must be reported.
@@ -175,9 +204,13 @@ run interrupted "$snapshot"
 check "an interruption after a successful stop restarts what was stopped" \
   '[[ $code != 0 ]] && restarted webcid && ! renamed'
 
-run restart-fails "$snapshot"
+run "api-stop-fails restart-fails" "$snapshot"
 check "a failed restart is reported, never claimed as done" \
-  '[[ $code == 1 && $output == *"FAILED to restart"*apicid* && $output != *"restarted apicid"* && $output != *"were restarted"* ]]'
+  '[[ $code == 1 && $output == *"FAILED to restart"*webcid* && $output != *"restarted webcid"* ]]'
+
+# PR #34 review, P3: recovery must not depend on removing the temporary files.
+run "api-stop-fails cleanup-fails" "$snapshot"
+check "a failed cleanup still restarts what was stopped" '[[ $code == 1 ]] && restarted webcid && ! renamed'
 
 run ok
 check "a missing snapshot id is refused" '[[ $code == 2 && ! -s "$work/calls" ]]'
