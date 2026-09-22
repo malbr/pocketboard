@@ -309,21 +309,25 @@ failing the deploy, because the verified snapshot already exists.
     names are still there) or `could not be established`.
 
   **Steps for a swap error** (as root, with `pg` set to the PostgreSQL
-  container id):
-  1. Make sure no swap can still run. `docker top "$pg"` must list no `psql`
-     process, and
-     `docker exec "$pg" psql -U pocketboard -d postgres -tAc "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'pocketboard-restore-swap'"`
-     must print `0`. Check both again a minute later.
-  2. Only then read the names:
-     `docker exec "$pg" psql -U pocketboard -d postgres -c 'SELECT datname FROM pg_database'`.
-     The names alone prove nothing while a swap could still run.
-     - `pocketboard_restore` is still there and no new
-       `pocketboard_before_restore_*` exists: the swap did not happen. Start
-       the current release again with an authorized rollback to the SHA in
-       `current`.
-     - A new `pocketboard_before_restore_*` exists and `pocketboard_restore`
-       is gone: the swap committed. Continue below.
-     - Anything else: stop and raise it on the issue.
+  container id). The script has already left `api` and `web` stopped;
+  nothing here is permission to start them.
+  1. Collect diagnostics. They describe this moment only and **cannot prove**
+     that a swap will not still commit: a Docker execution the daemon
+     accepted can stay pending through any number of observations.
+     - `docker top "$pg"`, looking for a `psql` process
+     - `docker exec "$pg" psql -U pocketboard -d postgres -tAc "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'pocketboard-restore-swap'"`
+     - `docker exec "$pg" psql -U pocketboard -d postgres -c 'SELECT datname FROM pg_database'`
+  2. Decide from the database names:
+     - **The swap committed** (a new `pocketboard_before_restore_*` exists
+       and `pocketboard_restore` is gone): the restore is done. Continue with
+       the release selection below.
+     - **Anything else**, including names that look unchanged: the outcome is
+       not established. Leave `api` and `web` stopped. **Do not restart** the
+       application, authorize a rollback, or rerun the restore on the basis
+       of process absence, database names, or elapsed time; a pending swap
+       would then commit under a running older release.
+       **Escalate on issue #8** with the script's output and these
+       diagnostics, and agree a separately reviewed recovery action.
 
   A failed run leaves `pocketboard_restore` for inspection, and the next run
   replaces it.

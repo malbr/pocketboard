@@ -165,6 +165,11 @@ run swap-pending "$snapshot"
 check "unchanged names after a swap error never restart the application" \
   '[[ $code == 1 && $output == *"left stopped"* && $output != *"were restarted"* ]] && never_restarted'
 check "the output says a delayed swap cannot be ruled out" '[[ $output == *"cannot be ruled out"* ]]'
+# PR #34 review: the swap is still pending while nothing shows it, which is
+# what the owner would see at every observation. The script must hand the
+# decision to the runbook rather than to elapsed time.
+check "the output sends the owner to the runbook, not to a restart" \
+  '[[ $output == *"runbook"* && $output != *"start the"* ]]'
 
 # PR #33 follow-up review, P1: an error from the swap command does not prove
 # the transaction rolled back. PostgreSQL may have committed both renames
@@ -227,6 +232,17 @@ chmod 600 "$work/backup.env"
 section="$(sed -n '/^## Recovery/,/^## Integration tests/p' "$runbook")"
 check "the runbook restores with pocketboard-restore" '[[ $section == *"pocketboard-restore <snapshot id>"* ]]'
 check "the runbook has no database rename of its own" '[[ $section != *"RENAME TO"* ]]'
+
+# PR #34 review: an accepted Docker execution can stay pending through any
+# number of observations, so no observation, name or wait may authorize a
+# restart. Only a confirmed committed swap, or a reviewed recovery action,
+# lets the application run again.
+check "the runbook calls the swap-error observations diagnostics, not proof" \
+  '[[ $section == *"cannot prove"* && $section != *"Make sure no swap can still run"* ]]'
+check "the runbook keeps an unestablished outcome stopped and escalates" \
+  '[[ $section == *"Escalate on issue #8"* && $section == *"Do not restart"* ]]'
+check "the runbook never authorizes a restart from names or elapsed time" \
+  '[[ $section == *"process absence, database names, or elapsed time"* ]]'
 
 if (( failures > 0 )); then
   echo "$failures case(s) failed"
