@@ -170,6 +170,29 @@ jobs:
           SARIF_DIR: ${{ runner.temp }}/codeql
         run: node scripts/release/fail-on-sarif-results.mjs "$SARIF_DIR"
 
+  # The SSH -> gate -> polkit -> systemd -> root script path, with real sshd,
+  # polkitd, Docker and Restic, in a throwaway privileged container that the
+  # harness builds and removes. Approved in
+  # https://github.com/malbr/pocketboard/issues/8#issuecomment-5818982953
+  # (issue8-ci-host-integration-71b8723). No secrets and no token permissions
+  # beyond reading the repository; nothing outside the runner is touched.
+  host-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # POCKETBOARD_DISPOSABLE_HOST is deliberately not set here: the harness
+      # sets it only inside the throwaway container, so host.test.sh still
+      # refuses to run on any other machine.
+      - name: Integration-test a disposable host
+        run: bash deploy/vps/tests/integration/run-disposable-host.sh
+
   images:
     runs-on: ubuntu-latest
     permissions:
@@ -227,7 +250,7 @@ jobs:
     # Only commits that reached main (through an owner-merged pull request)
     # publish. Pull requests, including forks, never reach this job.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [build-and-test, openapi-drift, secret-scan, codeql, images]
+    needs: [build-and-test, openapi-drift, secret-scan, codeql, images, host-integration]
     runs-on: ubuntu-latest
     permissions:
       contents: read
