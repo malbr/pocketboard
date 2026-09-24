@@ -291,9 +291,44 @@ failing the deploy, because the verified snapshot already exists.
   `--exit-on-error --single-transaction`, and requires a readable `cards`
   table and a non-empty Drizzle ledger. Only then does it stop `api` and
   `web` and swap both database names in one transaction, keeping the replaced
-  database as `pocketboard_before_restore_<UTC time>`. Any earlier failure
-  exits non-zero with the live database and the running application
-  unchanged; a failed swap is rolled back and restarts `api` and `web`.
+  database as `pocketboard_before_restore_<YYYYMMDD_HHMMSS UTC>`. Any earlier
+  failure exits non-zero with the live database and the running application
+  unchanged. A failure or interruption (Ctrl-C, a closed session) while it
+  stops `api` and `web` restarts whatever it had stopped. Each restart that
+  fails is named as `FAILED to restart`, so start those by hand.
+
+  Once the swap has been sent, the script never restarts anything itself. An
+  error from the swap does not prove it rolled back: PostgreSQL can commit
+  after the response is lost, and a command Docker accepted can reach
+  PostgreSQL late. The swap has a 120-second deadline. After an error the
+  script reads the database names once, with a 10-second deadline:
+  - **Committed** (a new `pocketboard_before_restore_*` exists): it prints a
+    `WARNING` and continues as a successful swap.
+  - **Anything else:** it fails and leaves `api` and `web` stopped. The
+    message says either `a delayed swap cannot be ruled out` (the original
+    names are still there) or `could not be established`.
+
+  **Steps for a swap error** (as root, with `pg` set to the PostgreSQL
+  container id). The script has already left `api` and `web` stopped;
+  nothing here is permission to start them.
+  1. Collect diagnostics. They describe this moment only and **cannot prove**
+     that a swap will not still commit: a Docker execution the daemon
+     accepted can stay pending through any number of observations.
+     - `docker top "$pg"`, looking for a `psql` process
+     - `docker exec "$pg" psql -U pocketboard -d postgres -tAc "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'pocketboard-restore-swap'"`
+     - `docker exec "$pg" psql -U pocketboard -d postgres -c 'SELECT datname FROM pg_database'`
+  2. Decide from the database names:
+     - **The swap committed** (a new `pocketboard_before_restore_*` exists
+       and `pocketboard_restore` is gone): the restore is done. Continue with
+       the release selection below.
+     - **Anything else**, including names that look unchanged: the outcome is
+       not established. Leave `api` and `web` stopped. **Do not restart** the
+       application, authorize a rollback, or rerun the restore on the basis
+       of process absence, database names, or elapsed time; a pending swap
+       would then commit under a running older release.
+       **Escalate on issue #8** with the script's output and these
+       diagnostics, and agree a separately reviewed recovery action.
+
   A failed run leaves `pocketboard_restore` for inspection, and the next run
   replaces it.
 

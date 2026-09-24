@@ -34,7 +34,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker run -d --name "$pg" --label "com.docker.compose.project=$project"   --label com.docker.compose.service=postgres -e POSTGRES_USER=pocketboard -e POSTGRES_DB=pocketboard \
+docker run -d --name "$pg" --label "com.docker.compose.project=$project" \
+  --label com.docker.compose.service=postgres -e POSTGRES_USER=pocketboard -e POSTGRES_DB=pocketboard \
   -e POSTGRES_PASSWORD=throwaway-test-only "$pg_image" > /dev/null
 for _ in $(seq 60); do
   docker exec "$pg" pg_isready -h 127.0.0.1 -U pocketboard -d pocketboard > /dev/null 2>&1 && break
@@ -110,14 +111,21 @@ case "$1" in
   *) exit 99 ;;
 esac
 FAKE
-# Passes through to Docker. In hold-restore mode it first opens a session on
-# pocketboard_restore, so the swap's second rename fails after its first one
-# succeeded.
+# Passes through to Docker, except for the swap. With SWAP_MODE=hold it first
+# opens a session on pocketboard_restore, so the swap's second rename fails
+# after its first one succeeded. With SWAP_MODE=lose the swap runs and
+# commits, but the script is told it failed, as when the response is lost.
 cat > "$work/bin/docker" <<FAKE
 #!/usr/bin/env bash
-if [[ "\${HOLD_RESTORE:-}" == yes && "\$*" == *"RENAME TO"* ]]; then
-  "$real_docker" exec -d "$pg" psql -U pocketboard -d pocketboard_restore -c 'SELECT pg_sleep(10)'
-  sleep 2
+if [[ "\$*" == *"RENAME TO"* ]]; then
+  case "\${SWAP_MODE:-}" in
+    hold)
+      "$real_docker" exec -d "$pg" psql -U pocketboard -d pocketboard_restore -c 'SELECT pg_sleep(10)'
+      sleep 2 ;;
+    lose)
+      "$real_docker" "\$@" > /dev/null 2>&1
+      exit 1 ;;
+  esac
 fi
 exec "$real_docker" "\$@"
 FAKE
@@ -125,10 +133,10 @@ chmod +x "$work/bin/restic" "$work/bin/docker"
 printf 'RESTIC_REPOSITORY=test-only\nRESTIC_PASSWORD=test-only\n' > "$work/backup.env"
 chmod 600 "$work/backup.env"
 
-# restore <dump file> [HOLD_RESTORE=yes]; sets code, output
+# restore <dump file> [hold|lose]; sets code, output
 restore() {
   code=0
-  output="$(env PATH="$work/bin:$PATH" FAKE_DUMP="$1" HOLD_RESTORE="${2:-}" \
+  output="$(env PATH="$work/bin:$PATH" FAKE_DUMP="$1" SWAP_MODE="${2:-}" \
     POCKETBOARD_BACKUP_ENV="$work/backup.env" POCKETBOARD_BACKUP_TMP="$work/tmp" \
     RESTIC_CACHE_DIR="$work/cache" POCKETBOARD_EXPECTED_OWNER_UID="$(id -u)" \
     POCKETBOARD_COMPOSE_PROJECT="$project" bash "$root/deploy/vps/pocketboard-restore" 5e1f00d1 2>&1)" || code=$?
@@ -162,10 +170,17 @@ psql -d postgres -c "DROP DATABASE unmigrated;"
 restore "$work/unmigrated.dump"
 check "a dump that fails verification is never swapped in" 'untouched && [[ $output == *"ledger"* ]]'
 
-restore "$work/restore.dump" yes
-check "a swap whose second rename fails is rolled back and restarts the application" \
-  'untouched && [[ $output == *"swap failed"* ]] && [[ "$(psql -d postgres -tAc "SELECT count(*) FROM pg_database WHERE datname = '"'"'pocketboard_restore'"'"'")" == 1 ]]'
+# PR #34 review, P1: unchanged names after a swap error do not prove the swap
+# cannot still commit, so the script leaves the application stopped.
+restore "$work/restore.dump" hold
+check "a swap whose second rename fails leaves the live database unchanged and the application stopped" \
+  '(( code != 0 )) && ! swapped && [[ "$(live_cards)" == 3 ]] && ! api_running &&
+   [[ $output == *"cannot be ruled out"* && $output == *"left stopped"* ]] &&
+   [[ "$(psql -d postgres -tAc "SELECT count(*) FROM pg_database WHERE datname = '"'"'pocketboard_restore'"'"'")" == 1 ]]'
 psql -d postgres -tAc "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'pocketboard_restore'" > /dev/null
+# The owner's decision, per the runbook: the original database is live, so
+# the current release is started again.
+docker start "$api" > /dev/null
 
 restore "$work/restore.dump"
 check "a verified restore succeeds" '(( code == 0 )) && [[ $output == *"swapped"* ]]'
@@ -179,6 +194,18 @@ check "the migration ledger identifies the last applied journal entry (0001)" \
 replaced="$(psql -d postgres -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'pocketboard_before_restore_%'")"
 check "the replaced database is kept for comparison" '[[ "$(psql -d "$replaced" -tAc "SELECT count(*) FROM cards")" == 3 ]]'
 check "the application is left stopped for an authorized rollback" '! api_running'
+
+# PR #33 follow-up review, P1: the swap commits but its response is lost. The
+# script must find the restored database live and must not restart the
+# previous application against it.
+docker start "$api" > /dev/null
+psql -d pocketboard -c "INSERT INTO cards (title) VALUES ('after the first restore');"
+sleep 1 # the replaced database's name is per second
+restore "$work/restore.dump" lose
+check "a committed swap with a lost response is reported as swapped, with a warning" \
+  '(( code == 0 )) && [[ $output == *"WARNING"* && $output == *"swapped"* && $output != *"unchanged"* ]]'
+check "the restored database is live" '[[ "$(live_cards)" == 2 ]]'
+check "the previous application was not restarted against it" '! api_running'
 
 if (( failures > 0 )); then
   echo "$failures case(s) failed"
