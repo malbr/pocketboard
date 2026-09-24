@@ -360,9 +360,10 @@ failing the deploy, because the verified snapshot already exists.
   unauthorized requests, status with Docker stopped, gate output correlation,
   and Restic retention and restore over real snapshots.
   `run-disposable-host.sh` runs it in a throwaway privileged Ubuntu 24.04
-  container. It is not in CI, because that needs Ubuntu packages CI does not
-  install today. Never run it on the VPS: it refuses unless
-  `POCKETBOARD_DISPOSABLE_HOST=yes`.
+  container, and CI runs that on every pull request and push to `main` in the
+  `host-integration` job, which `publish` depends on. Never run `host.test.sh`
+  on the VPS: it refuses unless `POCKETBOARD_DISPOSABLE_HOST=yes`, which only
+  the harness sets, inside the container.
 
 ## Evidence for the issue #8 handoff
 
