@@ -49,7 +49,9 @@ the initial POC.
 - PostgreSQL runs in a dedicated private container with persistent storage.
   Restic encrypts off-VPS backups to Cloudflare R2 after a local temporary dump.
 - Reuse the existing Uptime Kuma; add no other observability stack for the POC.
-- Use a free deSEC `*.dedyn.io` hostname until an owned domain is justified.
+- The production hostname is the POC-only `pocketboard.43-156-84-63.sslip.io`
+  (ADR 0008); replace it with an owned domain if PocketBoard moves past a
+  non-critical POC.
 - Production access is default-deny. Agent diagnostics must be explicit,
   supervised, temporary, and read-only; agents hold no persistent VPS credentials.
 

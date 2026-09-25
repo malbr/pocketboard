@@ -14,7 +14,7 @@ requirements, approvals, code review evidence, or release history live.
 | --- | --- | --- |
 | Local web app | `http://127.0.0.1:5173` | Available while `npm run dev` is running |
 | Local API health | `http://127.0.0.1:3000/health` | Available while the API is running |
-| Production VPS | `https://<name>.dedyn.io` (not yet assigned) | Not deployed. The deploy path is in [production deployment](deployment.md); host installation and the first deploy each need their own approval on #8 |
+| Production VPS | `https://pocketboard.43-156-84-63.sslip.io` (POC-only, [ADR 0008](adr/0008-sslip-io-poc-hostname.md)) | TLS reverse proxy live; PocketBoard not yet deployed, so `/api/health` answers `502` for now. The deploy path is in [production deployment](deployment.md); the first deploy needs its own approval on #8 |
 | Release images | `ghcr.io/malbr/pocketboard-{api,web}:<commit SHA>` | Published by CI for each commit on `main`; never deployed automatically. See [release artifacts](release.md) |
 
 `main` contains owner-only GitHub authentication (PR #11, merged 2026-09-17), so
