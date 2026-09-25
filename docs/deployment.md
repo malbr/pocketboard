@@ -118,8 +118,17 @@ with the names and modes in [release artifacts](release.md#secret-files).
 
 Prerequisites: an amd64 host with Docker Engine and the Compose plugin, a
 running `polkitd`, and `restic`, `curl` and `flock` installed. You also need a
-TLS reverse proxy for the deSEC hostname that forwards to `127.0.0.1:8080` and
-sets `X-Forwarded-Proto`.
+TLS reverse proxy for the production hostname that forwards to
+`127.0.0.1:8080` and sets `X-Forwarded-Proto`.
+
+**Reviewed host state for the current VPS** (ADR 0008,
+https://github.com/malbr/pocketboard/issues/8#issuecomment-5826103589): the
+Ubuntu `caddy` package (with `libnss3-tools`, no other package changed)
+already reverse-proxies the exact hostname `pocketboard.43-156-84-63.sslip.io`
+to `127.0.0.1:8080`, obtains and renews its public TLS certificate
+automatically, and returns `502` until PocketBoard is deployed, because
+nothing yet listens on 8080. That `502` is expected and is not an application
+health signal.
 
 Install from the approved merge commit, never from a branch:
 
@@ -140,7 +149,7 @@ install -o root -g root -m 0644 deploy/vps/config/50-pocketboard-deploy.rules /e
 install -o root -g root -m 0644 deploy/vps/config/60-pocketboard-deploy.conf /etc/ssh/sshd_config.d/
 install -o root -g root -m 0644 deploy/vps/config/deploy.env.example /etc/pocketboard/deploy.env
 install -o root -g root -m 0600 deploy/vps/config/authorized-requests.example /etc/pocketboard/authorized-requests
-# edit /etc/pocketboard/deploy.env: PUBLIC_URL=https://<name>.dedyn.io
+# edit /etc/pocketboard/deploy.env: PUBLIC_URL=https://pocketboard.43-156-84-63.sslip.io
 
 useradd --system --no-create-home --home-dir /nonexistent --shell /bin/sh pocketboard-deploy
 usermod -p '*' pocketboard-deploy   # no password, but not "locked", so key login works
@@ -187,6 +196,18 @@ the credential stays in root's deploy-only Docker config:
 ```sh
 DOCKER_CONFIG=/var/lib/pocketboard/docker docker login ghcr.io -u malbr
 ```
+
+**GitHub OAuth App (production).** Create or update the production OAuth App
+so its homepage and callback URL exactly match the current production
+hostname (ADR 0008):
+
+- Homepage URL: `https://pocketboard.43-156-84-63.sslip.io`
+- Callback URL: `https://pocketboard.43-156-84-63.sslip.io/api/auth/github/callback`
+
+This must be redone if the hostname changes, for example after a VPS IP
+migration (ADR 0008). Place the resulting client id and secret only as
+described in [release artifacts](release.md#secret-files); never paste them
+into this repository, an issue, or agent chat.
 
 **GitHub Environment.** Create `production` in the repository settings:
 
