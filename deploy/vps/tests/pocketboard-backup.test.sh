@@ -16,6 +16,8 @@ DUMP_BYTES=""
 STATS_0=""
 STATS_1=""
 STATS_2=""
+STATS_1_RAW=""
+ENV_OVERRIDE=""
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -57,11 +59,15 @@ case "$1" in
     grep -q '^restic forget' "$FAKE_CALLS" && stage=1
     grep -q '^restic backup' "$FAKE_CALLS" && stage=2
     for candidate in "$stage" 1 0; do
-      [[ -f "$FAKE_STATS.$candidate" ]] && { body="$(cat "$FAKE_STATS.$candidate")"; break; }
+      [[ -f "$FAKE_STATS.$candidate" ]] && { fixture="$FAKE_STATS.$candidate"; break; }
     done
-    [[ "$body" == EMPTY ]] && { printf ""; exit 0; }
-    [[ "$body" == EXIT1 ]] && exit 1
-    printf '%s\n' "$body" ;;
+    # The fixture is written out byte for byte, so a NUL or any other byte a
+    # shell would silently drop reaches the script under test.
+    case "$(head -c 5 "$fixture")" in
+      EMPTY) exit 0 ;;
+      EXIT1) exit 1 ;;
+    esac
+    cat "$fixture" ;;
   backup)
     [[ "$FAKE_MODE" == backup-fail ]] && exit 1
     cat > "$FAKE_STORE"
@@ -101,8 +107,13 @@ run() {
   printf '%s\n' "${STATS_1:-{\"total_size\":1024,\"snapshots_count\":3\}}" > "$work/stats.1"
   [[ -n "$STATS_0" ]] && printf '%s\n' "$STATS_0" > "$work/stats.0"
   [[ -n "$STATS_2" ]] && printf '%s\n' "$STATS_2" > "$work/stats.2"
+  # A raw fixture is a printf format, so a case can stage bytes a shell variable
+  # cannot carry, such as a NUL.
+  # shellcheck disable=SC2059
+  [[ -n "$STATS_1_RAW" ]] && printf "$STATS_1_RAW" > "$work/stats.1"
   code=0
-  output="$(env -i PATH="$work/bin:/usr/bin:/bin" FAKE_CALLS="$work/calls" FAKE_STORE="$work/store" \
+  output="$(env -i PATH="$work/bin:/usr/bin:/bin" ${ENV_OVERRIDE:+"$ENV_OVERRIDE"} \
+    FAKE_CALLS="$work/calls" FAKE_STORE="$work/store" \
     FAKE_STATS="$work/stats" FAKE_MODE="$mode" FAKE_DUMP_BYTES="$DUMP_BYTES" \
     POCKETBOARD_BACKUP_ENV="$work/backup.env" POCKETBOARD_BACKUP_TMP="$work/tmp" \
     POCKETBOARD_EXPECTED_OWNER_UID="$(id -u)" bash "$backup" "$@" 2>&1)" || code=$?
@@ -207,11 +218,11 @@ check "a failed retention before the upload stops the deploy with nothing upload
 
 run forget-fail-after "$sha"
 check "a failed retention after the verified upload still fails the deploy" \
-  '[[ $code == 1 && $output == *"retention"* && $output == *"after the verified upload"* ]] && uploaded'
+  '[[ $code == 1 && $output == *"retention"* && $output == *"after the verified upload"* ]] && uploaded && no_dump_left'
 
 STATS_2='{"total_size":1024,"snapshots_count":21}' run ok "$sha"
 check "more than 20 snapshots after the upload fails the deploy" \
-  '[[ $code == 1 && $output == *"holds 21 snapshot"* ]]'
+  '[[ $code == 1 && $output == *"holds 21 snapshot"* ]] && no_dump_left'
 
 STATS_2='{"total_size":1024,"snapshots_count":20}' run ok "$sha"
 check "exactly 20 snapshots after the upload is accepted" \
@@ -219,7 +230,7 @@ check "exactly 20 snapshots after the upload is accepted" \
 
 STATS_2='{"total_size":2147483649,"snapshots_count":3}' run ok "$sha"
 check "raw data over 2 GiB after the upload fails the deploy" \
-  '[[ $code == 1 && $output == *"2147483649 bytes of raw data"* ]]'
+  '[[ $code == 1 && $output == *"2147483649 bytes of raw data"* ]] && no_dump_left'
 
 # Real restic 0.16.4 output for a repository that has only been initialised.
 STATS_1='{"total_size":0,"snapshots_count":0}' run ok "$sha"
@@ -259,6 +270,9 @@ untrustworthy=(
   'a string value|{"total_size":0,"snapshots_count":3,"note":"x"}'
   'a duplicated unrelated key|{"total_size":0,"total_blob_count":1,"total_blob_count":2,"snapshots_count":3}'
   'a key with a capital letter|{"Total_size":0,"snapshots_count":3}'
+  # PR #38 third pass: JSON forbids a leading zero, and the field carrying it
+  # need not be one the quota reads for the reply to be malformed.
+  'a leading zero in another field|{"total_size":0,"total_blob_count":01,"snapshots_count":3}'
 )
 untrustworthy+=('two objects|{"total_size":1024,"snapshots_count":3}'$'\n''{"total_size":9,"snapshots_count":1}')
 for entry in "${untrustworthy[@]}"; do
@@ -274,27 +288,55 @@ check "a quota rejection still deletes the temporary dump and names no secret" \
 # Command failures one at a time (PR #38 review, finding 2).
 run backup-fail "$sha"
 check "a failed restic backup fails the deploy and reads nothing back" \
-  '[[ $code != 0 ]] && ! grep -q "^restic dump" "$work/calls"'
+  '[[ $code != 0 ]] && ! grep -q "^restic dump" "$work/calls" && no_dump_left'
 
 run dump-exit1 "$sha"
 check "a read-back that emits the right bytes but exits non-zero still fails" \
-  '[[ $code != 0 && $output != *"verified backup"* ]]'
+  '[[ $code != 0 && $output != *"verified backup"* ]] && no_dump_left'
 
 STATS_2='{"total_size":1024,"snapshots_count":"three"}' run ok "$sha"
 check "untrustworthy evidence after the upload also fails the deploy" \
-  '[[ $code == 1 && $output == *"FAILED: restic "* ]] && uploaded'
+  '[[ $code == 1 && $output == *"FAILED: restic "* ]] && uploaded && no_dump_left'
 
 STATS_2='{"total_size":2147483648,"snapshots_count":3}' run ok "$sha"
 check "exactly 2 GiB of raw data after the upload is accepted" \
   '[[ $code == 0 && $output == *"verified backup"* ]]'
 
-# The limits must not be raisable from the settings file (PR #38 re-review,
-# finding 2: no case covered this).
+# The reply real Restic 0.16.4 writes must keep working: the grammar above is a
+# whitelist, so a case has to fail if it ever narrows past the real thing
+# (PR #38 third pass).
+STATS_1='{"total_size":2251,"total_uncompressed_size":2344,"compression_ratio":1.0413149711239449,"compression_progress":100,"compression_space_saving":3.967576791808869,"total_blob_count":2,"snapshots_count":1}' run ok "$sha"
+check "the populated reply restic 0.16.4 writes, compression fields and all, is accepted" \
+  '[[ $code == 0 && $output == *"verified backup"* ]] && uploaded'
+
+STATS_1='{"total_size":0,"compression_space_saving":1e-07,"snapshots_count":3}' run ok "$sha"
+check "a float in scientific notation in another field is accepted" \
+  '[[ $code == 0 && $output == *"verified backup"* ]] && uploaded'
+
+# One constant per case, each with a scenario that crosses only that limit:
+# sourcing stops at the first readonly assignment, so a combined fixture would
+# leave the others unproven (PR #38 third pass, finding 2).
 write_env
-printf 'max_dump_bytes=999999999999\nmax_snapshots=9999\n' >> "$work/backup.env"
+printf 'max_dump_bytes=999999999999\n' >> "$work/backup.env"
 DUMP_BYTES=$((100 * 1024 * 1024 + 1)) run ok "$sha"
-check "backup.env cannot raise a limit" '[[ $code != 0 ]] && ! uploaded && no_dump_left'
+check "backup.env cannot raise the dump limit" '[[ $code != 0 ]] && ! uploaded && no_dump_left'
+
 write_env
+printf 'max_raw_bytes=999999999999\n' >> "$work/backup.env"
+STATS_1='{"total_size":2147483628,"snapshots_count":3}' run ok "$sha"
+check "backup.env cannot raise the raw-data limit" '[[ $code != 0 ]] && ! uploaded && no_dump_left'
+
+write_env
+printf 'max_snapshots=9999\n' >> "$work/backup.env"
+STATS_1='{"total_size":1024,"snapshots_count":20}' run ok "$sha"
+check "backup.env cannot raise the snapshot limit" '[[ $code != 0 ]] && ! uploaded && no_dump_left'
+write_env
+
+# The constants are assigned before anything is read, so an inherited value is
+# overwritten rather than honoured, and the real limit still reports itself.
+ENV_OVERRIDE="max_dump_bytes=999999999999" DUMP_BYTES=$((100 * 1024 * 1024 + 1)) run ok "$sha"
+check "the host environment cannot raise a limit" \
+  '[[ $code == 1 && $output == *"104857600 bytes (100 MiB)"* ]] && ! uploaded'
 
 # Remaining single command failures (PR #38 re-review, finding 2).
 run dump-fail "$sha"
@@ -304,6 +346,12 @@ check "a failed pg_dump stops the deploy before any restic write" \
 STATS_2=EXIT1 run ok "$sha"
 check "a failed statistics command after the upload fails the deploy and cleans up" \
   '[[ $code == 1 && $output == *"FAILED: restic could not report"* ]] && uploaded && no_dump_left'
+
+# Bash drops NUL bytes when it reads a command's output into a string, which
+# would turn an unreadable reply into a plausible one (PR #38 third pass).
+STATS_1_RAW='{"total_size":0,\000"snapshots_count":3}\n' run ok "$sha"
+check "a reply carrying a NUL byte is not usable quota evidence" \
+  '[[ $code == 1 && $output == *"FAILED: restic "* ]] && ! uploaded && no_dump_left'
 # --- end quota cases -------------------------------------------------------
 
 write_env 644

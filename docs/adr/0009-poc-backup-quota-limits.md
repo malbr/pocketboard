@@ -48,10 +48,14 @@ size.
   limit, even though Restic deduplicates and compresses it. Equality passes; any
   larger projection fails.
 - Evidence fails closed, and the whole reply is validated before any number is
-  read out of it: it must be one flat JSON object of numeric fields with unique
-  keys. Searching that text for keys is not sufficient, because a field
-  duplicated as a JSON escape, a trailing comma or a string value all read as a
-  clean small number. A `restic stats` that fails, a reply outside that shape,
+  read out of it: it must be one flat JSON object whose keys are unique and whose
+  values are JSON numbers, in every field, not only the two the quota reads.
+  Searching that text for keys is not sufficient, because a field duplicated as a
+  JSON escape, a trailing comma, a string value or a spelling JSON forbids such
+  as `01` all read as a clean small number. The bytes Restic wrote are also
+  compared with what survives becoming a shell string, because a NUL is dropped
+  silently and would turn an unreadable reply into a plausible one. A
+  `restic stats` that fails, a reply outside that shape,
   and a field that is missing, repeated in any spelling, non-numeric, negative,
   fractional, zero-padded or longer than 15 digits all stop the backup. Before
   the upload that means the new dump is not uploaded, though preflight `prune`

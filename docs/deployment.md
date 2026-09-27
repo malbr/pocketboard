@@ -316,30 +316,38 @@ is the point.
 
 The evidence comes from `restic stats --mode raw-data --json`, which reports
 `total_size` and `snapshots_count` for the whole repository. The whole reply must
-be one flat JSON object of numeric fields with unique keys, exactly as Restic
-0.16.4 writes it; the two numbers are read only after that. Evidence that is
-missing, repeated in any spelling, non-numeric, negative, fractional,
-zero-padded or too large to trust is a failure rather than a zero, and so is any
-reply outside that shape: the backup stops and the deploy stops with it. A
-Restic release that changes the shape, including one that adds a non-numeric
-field, therefore blocks deploys until the parser is re-verified.
+be one flat JSON object with unique keys and a JSON number in every field,
+exactly as Restic 0.16.4 writes it, and must carry no byte a shell would drop;
+the two numbers are read only after that. Evidence that is missing, repeated in
+any spelling, non-numeric, negative, fractional, zero-padded or too large to
+trust is a failure rather than a zero, and so is any reply outside that shape:
+the backup stops and the deploy stops with it. A Restic release that changes the
+shape, including one that adds a non-numeric field, therefore blocks deploys
+until the parser is re-verified.
 
 **Diagnosing a rejection.** The Deploy log carries one `backup: FAILED: …` line
 naming the measured numbers:
 
 - `the dump is <n> bytes and the limit is 104857600 bytes (100 MiB)` — the
-  database outgrew the POC limit. Nothing was uploaded.
+  database outgrew the POC limit. Nothing was uploaded and no retention ran.
 - `the upload would project <n> bytes of raw data and the limit is 2147483648
-  bytes (2 GiB)` — the repository is near full even after retention. Nothing was
-  uploaded.
+  bytes (2 GiB)` — the repository is near full even after retention. The new dump
+  was not uploaded, though the preflight `prune` may have written repacked data.
 - `the repository holds <n> snapshots and the limit is 20` — retention could not
   bring the count under 20, or the new snapshot took it over.
 - `retention (restic forget --prune) failed …` — R2 or the repository refused the
   operation that keeps the limits reachable.
-- `restic could not report …`, `restic did not report one flat JSON statistics
-  object`, `restic reported no usable total_size`/`snapshots_count` — Restic gave
-  nothing the guard will act on. Check the repository is reachable and that
-  `restic version` is still 0.16.4.
+- Restic gave nothing the guard will act on. Check the repository is reachable and
+  that `restic version` is still 0.16.4. One of:
+  - `restic could not report repository size and snapshot evidence` — the
+    `stats` command itself failed.
+  - `restic statistics are not the flat JSON object this check reads` — the reply
+    is not the shape 0.16.4 writes.
+  - `restic statistics repeat a field, so the evidence is ambiguous`
+  - `restic statistics contain bytes this check cannot read` — the reply carried a
+    byte, such as a NUL, that a shell would silently drop.
+  - `restic reported no usable total_size`/`snapshots_count` — the field is
+    missing or not a plain non-negative integer.
 
 As root, the same evidence by hand:
 
