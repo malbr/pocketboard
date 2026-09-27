@@ -50,14 +50,11 @@ retain() { # <stage>
 # is a failure rather than a zero, because the quota decisions rest entirely on
 # these two numbers. The digit bound also keeps the arithmetic below inside
 # Bash's signed 64-bit range.
-restic_number() { # <statistics json> <key>
+restic_number() { # <validated statistics json> <key>
   local json="$1" key="$2" hits value
-  # The quoted key name is counted, not "key":, so a field repeated as `"key" :`
-  # is still seen as a duplicate instead of quietly resolving to the first one
-  # (PR #38 review, finding 1). Unknown keys are not rejected: Restic adds
-  # fields between versions, and demanding an exact set would fail on any
-  # release that grows one.
-  hits="$(grep -o -- "\"$key\"" <<< "$json" | wc -l || true)"
+  # read_quota_evidence has already proved the payload's shape and that its keys
+  # are unique, so this only has to find the one pair and bound its value.
+  hits="$(grep -o -- "\"$key\":" <<< "$json" | wc -l || true)"
   (( hits == 1 )) || return 1
   value="$(sed -n "s/.*\"$key\":\([^,}]*\).*/\1/p" <<< "$json")"
   # Zero padding is refused with the rest: Bash would read 0999 as an invalid
@@ -67,14 +64,26 @@ restic_number() { # <statistics json> <key>
 }
 
 # Sets raw_bytes and snapshot_count from one repository-wide report, or exits.
+#
+# Restic 0.16.4 prints one flat JSON object of "key":<number> pairs, down to
+# {"total_size":0,"snapshots_count":0} on a repository that has only been
+# initialised. The whole payload is matched against that grammar before anything
+# is read out of it, because searching for keys in text cannot tell evidence
+# from noise: a field duplicated as a JSON escape ("total\u005fsize"), a
+# trailing comma or a string value all read as a clean small number otherwise
+# (PR #38 re-review, finding 1). Anything outside the grammar fails closed,
+# including a future Restic that adds a non-numeric field, which is why ADR 0009
+# makes re-verifying this parser part of a Restic upgrade.
 read_quota_evidence() {
-  local json
+  local json pair keys
   json="$(restic stats --mode raw-data --json)" \
     || die "restic could not report repository size and snapshot evidence"
-  # One flat object and nothing else: outer braces alone let two concatenated
-  # objects through (PR #38 review, finding 1).
-  [[ "$json" != *$'\n'* && "$json" =~ ^\{[^{}]*\}$ ]] \
-    || die "restic did not report one flat JSON statistics object"
+  pair='"[a-z_]+":-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?'
+  [[ "$json" =~ ^[{]${pair}(,${pair})*[}]$ ]] \
+    || die "restic statistics are not the flat JSON object this check reads"
+  keys="$(grep -o -- '"[a-z_]*":' <<< "$json" | sort)"
+  (( $(wc -l <<< "$keys") == $(sort -u <<< "$keys" | wc -l) )) \
+    || die "restic statistics repeat a field, so the evidence is ambiguous"
   raw_bytes="$(restic_number "$json" total_size)" \
     || die "restic reported no usable total_size for the repository"
   snapshot_count="$(restic_number "$json" snapshots_count)" \

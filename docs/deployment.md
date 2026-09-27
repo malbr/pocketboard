@@ -315,11 +315,14 @@ them: changing a limit takes a reviewed repository change and a release, which
 is the point.
 
 The evidence comes from `restic stats --mode raw-data --json`, which reports
-`total_size` and `snapshots_count` for the whole repository. Evidence that is
+`total_size` and `snapshots_count` for the whole repository. The whole reply must
+be one flat JSON object of numeric fields with unique keys, exactly as Restic
+0.16.4 writes it; the two numbers are read only after that. Evidence that is
 missing, repeated in any spelling, non-numeric, negative, fractional,
-zero-padded or too large to trust is a failure rather than a zero, and so is
-output that is not one flat JSON object: the backup stops and the deploy stops
-with it.
+zero-padded or too large to trust is a failure rather than a zero, and so is any
+reply outside that shape: the backup stops and the deploy stops with it. A
+Restic release that changes the shape, including one that adds a non-numeric
+field, therefore blocks deploys until the parser is re-verified.
 
 **Diagnosing a rejection.** The Deploy log carries one `backup: FAILED: …` line
 naming the measured numbers:
@@ -349,9 +352,11 @@ application and the release are untouched and the temporary dump is deleted, so
 the deploy stops instead of leaving a half-applied change. The repository is not
 untouched, and the phase that refused decides what already happened:
 
-- **Dump over 100 MiB** — nothing ran against the repository at all.
+- **Dump over 100 MiB** — the repository was read to check it is reachable
+  (`restic cat config`), but nothing was written to it and no snapshot exists.
 - **Preflight retention, evidence or limit** — retention has already run, so old
-  snapshots may already be forgotten and pruned. Nothing was uploaded.
+  snapshots may already be forgotten and pruned, and `prune` may have uploaded
+  repacked data of its own. The new dump was not uploaded.
 - **Postflight retention, evidence or limit** — the new snapshot was uploaded and
   verified before the check ran, and it stays. A postflight refusal does not undo
   the upload and does not by itself bring the repository back under the limits,

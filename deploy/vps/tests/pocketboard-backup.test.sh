@@ -28,6 +28,7 @@ case "$1" in
   ps) [[ "$FAKE_MODE" == no-db ]] || echo "pgcid" ;;
   exec)
     if [[ "$*" == *pg_dump* ]]; then
+      [[ "$FAKE_MODE" == dump-fail ]] && exit 1
       [[ "$FAKE_MODE" == bad-dump ]] && { echo "not a dump"; exit 0; }
       [[ -n "${FAKE_DUMP_BYTES:-}" ]] \
         && { printf PGDMP; head -c "$((FAKE_DUMP_BYTES - 5))" /dev/zero; exit 0; }
@@ -248,12 +249,22 @@ untrustworthy=(
   'a repeated snapshot count|{"total_size":0,"snapshots_count":3,"snapshots_count" :99}'
   'two objects on one line|{"total_size":0}{"snapshots_count":3}'
   'a nested object|{"total_size":{"nested":1},"snapshots_count":3}'
+  # PR #38 re-review, finding 1: a duplicate key spelled as a JSON escape, and
+  # malformed object contents, are still ambiguous evidence. Counting key text
+  # cannot see either, so the whole payload is matched against the shape Restic
+  # actually emits.
+  'a duplicate key escaped as \u005f|{"total_size":0,"total\u005fsize":2147483649,"snapshots_count":3}'
+  'a duplicate count escaped as \u005f|{"total_size":0,"snapshots_count":3,"snapshots\u005fcount":99}'
+  'a trailing comma|{"total_size":0,"snapshots_count":3,}'
+  'a string value|{"total_size":0,"snapshots_count":3,"note":"x"}'
+  'a duplicated unrelated key|{"total_size":0,"total_blob_count":1,"total_blob_count":2,"snapshots_count":3}'
+  'a key with a capital letter|{"Total_size":0,"snapshots_count":3}'
 )
 untrustworthy+=('two objects|{"total_size":1024,"snapshots_count":3}'$'\n''{"total_size":9,"snapshots_count":1}')
 for entry in "${untrustworthy[@]}"; do
   STATS_1="${entry#*|}" run ok "$sha"
   check "${entry%%|*} is not usable quota evidence, so nothing is uploaded" \
-    '[[ $code == 1 && $output == *"FAILED: restic "* ]] && ! uploaded'
+    '[[ $code == 1 && $output == *"FAILED: restic "* ]] && ! uploaded && no_dump_left'
 done
 
 STATS_1='{"total_size":2147483628,"snapshots_count":3}' run ok "$sha"
@@ -276,6 +287,23 @@ check "untrustworthy evidence after the upload also fails the deploy" \
 STATS_2='{"total_size":2147483648,"snapshots_count":3}' run ok "$sha"
 check "exactly 2 GiB of raw data after the upload is accepted" \
   '[[ $code == 0 && $output == *"verified backup"* ]]'
+
+# The limits must not be raisable from the settings file (PR #38 re-review,
+# finding 2: no case covered this).
+write_env
+printf 'max_dump_bytes=999999999999\nmax_snapshots=9999\n' >> "$work/backup.env"
+DUMP_BYTES=$((100 * 1024 * 1024 + 1)) run ok "$sha"
+check "backup.env cannot raise a limit" '[[ $code != 0 ]] && ! uploaded && no_dump_left'
+write_env
+
+# Remaining single command failures (PR #38 re-review, finding 2).
+run dump-fail "$sha"
+check "a failed pg_dump stops the deploy before any restic write" \
+  '[[ $code != 0 ]] && ! uploaded && ! grep -q "^restic forget" "$work/calls" && no_dump_left'
+
+STATS_2=EXIT1 run ok "$sha"
+check "a failed statistics command after the upload fails the deploy and cleans up" \
+  '[[ $code == 1 && $output == *"FAILED: restic could not report"* ]] && uploaded && no_dump_left'
 # --- end quota cases -------------------------------------------------------
 
 write_env 644

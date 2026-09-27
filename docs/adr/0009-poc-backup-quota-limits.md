@@ -47,12 +47,16 @@ size.
 - The pre-upload projection charges the whole dump size against the raw-data
   limit, even though Restic deduplicates and compresses it. Equality passes; any
   larger projection fails.
-- Evidence fails closed. A `restic stats` that fails, output that is not one flat
-  JSON object, and a field that is missing, repeated in any spelling,
-  non-numeric, negative, fractional, zero-padded or longer than 15 digits all
-  stop the backup rather than being read as a small number. Before the upload
-  that means nothing is uploaded. After it, the verified snapshot stays and only
-  the deploy stops.
+- Evidence fails closed, and the whole reply is validated before any number is
+  read out of it: it must be one flat JSON object of numeric fields with unique
+  keys. Searching that text for keys is not sufficient, because a field
+  duplicated as a JSON escape, a trailing comma or a string value all read as a
+  clean small number. A `restic stats` that fails, a reply outside that shape,
+  and a field that is missing, repeated in any spelling, non-numeric, negative,
+  fractional, zero-padded or longer than 15 digits all stop the backup. Before
+  the upload that means the new dump is not uploaded, though preflight `prune`
+  may already have written repacked data. After it, the verified snapshot stays
+  and only the deploy stops.
 - The limits are re-checked after the verified snapshot, so an upload that took
   the repository past a limit stops this deploy instead of surfacing on the next
   one.
@@ -76,11 +80,12 @@ size.
   for operations and for overhead the guard cannot see, so this reduces cost
   risk rather than removing it. Cloudflare's own billing notifications remain
   the backstop.
-- **Coupled to Restic 0.16.4's JSON.** The guard reads two fields by name and
-  refuses anything it cannot read unambiguously, so a Restic upgrade changing
-  `stats --json` blocks deploys until it is re-verified against
-  `deploy/vps/tests/pocketboard-backup.test.sh`. Treat a Restic upgrade on the
-  VPS as a change that needs that check first.
+- **Coupled to Restic 0.16.4's JSON.** The guard accepts only the flat numeric
+  object that version writes, so a Restic release that pretty-prints, renames a
+  field or adds a non-numeric one blocks deploys until the parser is re-verified
+  against `deploy/vps/tests/pocketboard-backup.test.sh`. That is the intended
+  direction of failure, and it makes a Restic upgrade on the VPS a change that
+  needs this check first rather than a routine package update.
 - **Two prunes per deploy.** Retention runs twice, which costs extra R2
   operations per deploy in exchange for the pre-upload headroom. `prune` also
   repacks data before deleting the old packs, so retention itself writes to R2
