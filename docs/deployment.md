@@ -316,9 +316,10 @@ is the point.
 
 The evidence comes from `restic stats --mode raw-data --json`, which reports
 `total_size` and `snapshots_count` for the whole repository. Evidence that is
-missing, repeated, non-numeric, negative, fractional, zero-padded or too large to
-trust is a failure rather than a zero: the backup stops and the deploy stops with
-it.
+missing, repeated in any spelling, non-numeric, negative, fractional,
+zero-padded or too large to trust is a failure rather than a zero, and so is
+output that is not one flat JSON object: the backup stops and the deploy stops
+with it.
 
 **Diagnosing a rejection.** The Deploy log carries one `backup: FAILED: …` line
 naming the measured numbers:
@@ -332,7 +333,7 @@ naming the measured numbers:
   bring the count under 20, or the new snapshot took it over.
 - `retention (restic forget --prune) failed …` — R2 or the repository refused the
   operation that keeps the limits reachable.
-- `restic could not report …`, `restic did not report one JSON statistics
+- `restic could not report …`, `restic did not report one flat JSON statistics
   object`, `restic reported no usable total_size`/`snapshots_count` — Restic gave
   nothing the guard will act on. Check the repository is reachable and that
   `restic version` is still 0.16.4.
@@ -343,12 +344,24 @@ As root, the same evidence by hand:
 ( set -a; . /etc/pocketboard/backup.env; restic stats --mode raw-data --json )
 ```
 
-A rejection changes nothing: the database, the running application and the
-existing snapshots are untouched, and the temporary dump is deleted on every exit
-path. Because the backup runs before anything changes the database, a rejection
-stops the deploy instead of leaving it half-applied. Recovering means making the
-repository smaller (a human-approved `restic forget` of specific snapshots) or
-raising a limit through a reviewed change, not editing anything on the VPS.
+**What a rejection leaves behind.** In every case the database, the running
+application and the release are untouched and the temporary dump is deleted, so
+the deploy stops instead of leaving a half-applied change. The repository is not
+untouched, and the phase that refused decides what already happened:
+
+- **Dump over 100 MiB** — nothing ran against the repository at all.
+- **Preflight retention, evidence or limit** — retention has already run, so old
+  snapshots may already be forgotten and pruned. Nothing was uploaded.
+- **Postflight retention, evidence or limit** — the new snapshot was uploaded and
+  verified before the check ran, and it stays. A postflight refusal does not undo
+  the upload and does not by itself bring the repository back under the limits,
+  so the next deploy can fail the same way until the repository is made smaller.
+
+Recovering means making the repository smaller (a human-approved `restic forget`
+of specific snapshots) or raising a limit through a reviewed change, not editing
+anything on the VPS. Note that `prune` repacks data before deleting the old
+packs, so retention itself writes to R2 and can raise usage briefly before
+lowering it.
 
 **What this does not do.** The limits bound what PocketBoard stores in R2. They
 are not a Cloudflare billing cap: R2 also bills for operations and for overhead

@@ -62,11 +62,14 @@ case "$1" in
     [[ "$body" == EXIT1 ]] && exit 1
     printf '%s\n' "$body" ;;
   backup)
+    [[ "$FAKE_MODE" == backup-fail ]] && exit 1
     cat > "$FAKE_STORE"
     echo '{"message_type":"status","percent_done":1}'
     echo '{"message_type":"summary","snapshot_id":"5e1f00d1c0ffee5e1f00d1c0ffee5e1f00d1c0ffee5e1f00d1c0ffee5e1f00d1","total_bytes_processed":21}' ;;
   dump)
-    if [[ "$FAKE_MODE" == corrupt ]]; then echo "different bytes"; else cat "$FAKE_STORE"; fi ;;
+    if [[ "$FAKE_MODE" == corrupt ]]; then echo "different bytes"; else cat "$FAKE_STORE"; fi
+    [[ "$FAKE_MODE" == dump-exit1 ]] && exit 1
+    : ;;
   forget)
     [[ "$FAKE_MODE" == forget-fail ]] && exit 1
     [[ "$FAKE_MODE" == forget-fail-after ]] && grep -q '^restic backup' "$FAKE_CALLS" && exit 1
@@ -133,8 +136,11 @@ check "a verified backup succeeds" '[[ $code == 0 && $output == *"verified backu
 check "the dump is streamed to restic under one stable path, tagged with the release" \
   'grep -q -- "--stdin --stdin-filename pocketboard.dump\$" "$work/calls" && grep -q -- "--tag sha-$sha" "$work/calls"'
 check "the uploaded snapshot is read back from that path" 'grep -q "^restic dump 5e1f00d1[0-9a-f]* /pocketboard.dump$" "$work/calls"'
-check "the accepted retention policy runs both before and after the upload" \
-  '(( $(grep -c -- "^restic forget .*--keep-daily 7 --keep-weekly 4 --keep-monthly 3 --prune" "$work/calls") == 2 ))'
+retention_line="^restic forget --host pocketboard --tag pocketboard --group-by host --keep-last 5 --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --prune\$"
+check "the whole accepted retention policy runs both before and after the upload" \
+  '(( $(grep -c -- "$retention_line" "$work/calls") == 2 ))'
+check "quota evidence comes from one repository-wide raw-data report, before and after" \
+  '(( $(grep -c -- "^restic stats --mode raw-data --json\$" "$work/calls") == 2 ))'
 check "the run keeps its order: verified dump, quota preflight, upload, read-back, quota postflight" \
   '[[ "$(sequence)" == repo,find-db,dump,verify-dump,retain,stats,upload,read-back,retain,stats ]]'
 check "retention groups every PocketBoard snapshot together, not per tag or path" \
@@ -236,6 +242,12 @@ untrustworthy=(
   'a repeated key|{"total_size":1024,"total_size":2147483647,"snapshots_count":3}'
   'an unterminated object|{"total_size":1024,"snapshots_count":3'
   'text that is not JSON|restic: stats unavailable'
+  # PR #38 review, finding 1: ambiguous evidence must not quietly resolve to the
+  # first readable number. All but the nested case uploaded before the fix.
+  'a key repeated with different spacing|{"total_size":0,"total_size" :2147483649,"snapshots_count":3}'
+  'a repeated snapshot count|{"total_size":0,"snapshots_count":3,"snapshots_count" :99}'
+  'two objects on one line|{"total_size":0}{"snapshots_count":3}'
+  'a nested object|{"total_size":{"nested":1},"snapshots_count":3}'
 )
 untrustworthy+=('two objects|{"total_size":1024,"snapshots_count":3}'$'\n''{"total_size":9,"snapshots_count":1}')
 for entry in "${untrustworthy[@]}"; do
@@ -247,6 +259,23 @@ done
 STATS_1='{"total_size":2147483628,"snapshots_count":3}' run ok "$sha"
 check "a quota rejection still deletes the temporary dump and names no secret" \
   'no_dump_left && [[ $output != *test-only* ]]'
+
+# Command failures one at a time (PR #38 review, finding 2).
+run backup-fail "$sha"
+check "a failed restic backup fails the deploy and reads nothing back" \
+  '[[ $code != 0 ]] && ! grep -q "^restic dump" "$work/calls"'
+
+run dump-exit1 "$sha"
+check "a read-back that emits the right bytes but exits non-zero still fails" \
+  '[[ $code != 0 && $output != *"verified backup"* ]]'
+
+STATS_2='{"total_size":1024,"snapshots_count":"three"}' run ok "$sha"
+check "untrustworthy evidence after the upload also fails the deploy" \
+  '[[ $code == 1 && $output == *"FAILED: restic "* ]] && uploaded'
+
+STATS_2='{"total_size":2147483648,"snapshots_count":3}' run ok "$sha"
+check "exactly 2 GiB of raw data after the upload is accepted" \
+  '[[ $code == 0 && $output == *"verified backup"* ]]'
 # --- end quota cases -------------------------------------------------------
 
 write_env 644

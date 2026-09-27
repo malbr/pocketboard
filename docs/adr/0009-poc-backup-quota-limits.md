@@ -47,10 +47,12 @@ size.
 - The pre-upload projection charges the whole dump size against the raw-data
   limit, even though Restic deduplicates and compresses it. Equality passes; any
   larger projection fails.
-- Evidence fails closed. A `restic stats` that fails, output that is not one
-  JSON object, and a field that is missing, repeated, non-numeric, negative,
-  fractional, zero-padded or longer than 15 digits all stop the backup with
-  nothing uploaded, rather than being read as a small number.
+- Evidence fails closed. A `restic stats` that fails, output that is not one flat
+  JSON object, and a field that is missing, repeated in any spelling,
+  non-numeric, negative, fractional, zero-padded or longer than 15 digits all
+  stop the backup rather than being read as a small number. Before the upload
+  that means nothing is uploaded. After it, the verified snapshot stays and only
+  the deploy stops.
 - The limits are re-checked after the verified snapshot, so an upload that took
   the repository past a limit stops this deploy instead of surfacing on the next
   one.
@@ -58,9 +60,14 @@ size.
 ## Consequences
 
 - **A full repository stops deployment.** That is the intent: the backup runs
-  before anything changes the database, so a rejection leaves production exactly
-  as it was. The operator diagnoses it from the `backup: FAILED: …` line
-  documented in `docs/deployment.md`.
+  before anything changes the database, so a rejection leaves the database, the
+  running application and the release exactly as they were. The repository is a
+  different matter, and which phase refused decides what already happened:
+  before the upload, retention may already have forgotten and pruned snapshots;
+  after it, the new snapshot was uploaded and verified and stays. A postflight
+  refusal therefore does not undo the upload and does not by itself bring the
+  repository back under the limits. The operator diagnoses the phase from the
+  `backup: FAILED: …` line documented in `docs/deployment.md`.
 - **Growth needs a decision, not a setting.** A PocketBoard that legitimately
   outgrows 100 MiB, 2 GiB or 20 snapshots needs a new ADR superseding this one
   and a released change, which is deliberately harder than editing a file on the
@@ -75,7 +82,9 @@ size.
   `deploy/vps/tests/pocketboard-backup.test.sh`. Treat a Restic upgrade on the
   VPS as a change that needs that check first.
 - **Two prunes per deploy.** Retention runs twice, which costs extra R2
-  operations per deploy in exchange for the pre-upload headroom.
+  operations per deploy in exchange for the pre-upload headroom. `prune` also
+  repacks data before deleting the old packs, so retention itself writes to R2
+  and can raise usage briefly before lowering it.
 - **Restore is unchanged.** Snapshot host, tags, path and the read-back
   SHA-256 comparison are untouched, so `pocketboard-restore` and the documented
   restore procedure keep working against existing snapshots.

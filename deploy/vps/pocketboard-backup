@@ -52,7 +52,12 @@ retain() { # <stage>
 # Bash's signed 64-bit range.
 restic_number() { # <statistics json> <key>
   local json="$1" key="$2" hits value
-  hits="$(grep -o -- "\"$key\":" <<< "$json" | wc -l || true)"
+  # The quoted key name is counted, not "key":, so a field repeated as `"key" :`
+  # is still seen as a duplicate instead of quietly resolving to the first one
+  # (PR #38 review, finding 1). Unknown keys are not rejected: Restic adds
+  # fields between versions, and demanding an exact set would fail on any
+  # release that grows one.
+  hits="$(grep -o -- "\"$key\"" <<< "$json" | wc -l || true)"
   (( hits == 1 )) || return 1
   value="$(sed -n "s/.*\"$key\":\([^,}]*\).*/\1/p" <<< "$json")"
   # Zero padding is refused with the rest: Bash would read 0999 as an invalid
@@ -66,8 +71,10 @@ read_quota_evidence() {
   local json
   json="$(restic stats --mode raw-data --json)" \
     || die "restic could not report repository size and snapshot evidence"
-  [[ "$json" != *$'\n'* && "$json" == '{'*'}' ]] \
-    || die "restic did not report one JSON statistics object"
+  # One flat object and nothing else: outer braces alone let two concatenated
+  # objects through (PR #38 review, finding 1).
+  [[ "$json" != *$'\n'* && "$json" =~ ^\{[^{}]*\}$ ]] \
+    || die "restic did not report one flat JSON statistics object"
   raw_bytes="$(restic_number "$json" total_size)" \
     || die "restic reported no usable total_size for the repository"
   snapshot_count="$(restic_number "$json" snapshots_count)" \
@@ -144,9 +151,10 @@ remote_sum="$(restic dump "$snapshot" "/$name" | sha256sum | cut -d' ' -f1)"
 [[ "$remote_sum" == "$local_sum" ]] || die "snapshot $snapshot does not match the local dump"
 
 # Quota postflight: retention again, then the same evidence re-read over the new
-# snapshot. An upload that took the repository past a limit stops the deploy
-# even though the snapshot itself is verified, so the next run starts inside the
-# limits rather than discovering them too late.
+# snapshot. An upload that took the repository past a limit stops this deploy
+# even though the snapshot itself is verified. Refusing here does not undo the
+# upload, so it can repeat until the repository is made smaller; what it buys is
+# that the deploy stops now instead of the limit surfacing on a later run.
 retain "after the verified upload"
 read_quota_evidence
 (( raw_bytes <= max_raw_bytes )) || die \
