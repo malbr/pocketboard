@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Exercises pocketboard-backup against fake `docker` and `restic`, so the
-# verify-before-upload and verify-after-upload rules are covered without a
-# database, R2, or credentials.
+# verify-before-upload, quota and verify-after-upload rules are covered without
+# a database, R2, or credentials.
 # Assertions are single-quoted on purpose: check() evaluates them after each run.
 # shellcheck disable=SC2016,SC2034
 set -euo pipefail
@@ -10,6 +10,14 @@ here="$(cd "$(dirname "$0")" && pwd)"
 backup="$here/../pocketboard-backup"
 sha="0123456789abcdef0123456789abcdef01234567"
 failures=0
+
+# Per-run knobs, set as prefix assignments on run() so they last one case only.
+DUMP_BYTES=""
+STATS_0=""
+STATS_1=""
+STATS_2=""
+STATS_1_RAW=""
+ENV_OVERRIDE=""
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -22,7 +30,10 @@ case "$1" in
   ps) [[ "$FAKE_MODE" == no-db ]] || echo "pgcid" ;;
   exec)
     if [[ "$*" == *pg_dump* ]]; then
+      [[ "$FAKE_MODE" == dump-fail ]] && exit 1
       [[ "$FAKE_MODE" == bad-dump ]] && { echo "not a dump"; exit 0; }
+      [[ -n "${FAKE_DUMP_BYTES:-}" ]] \
+        && { printf PGDMP; head -c "$((FAKE_DUMP_BYTES - 5))" /dev/zero; exit 0; }
       printf 'PGDMP fake dump body\n'
     elif [[ "$*" == *pg_restore* ]]; then
       cat > /dev/null
@@ -33,18 +44,43 @@ case "$1" in
 esac
 FAKE
 
+# `restic stats` answers from a staged file per repository state: stats.0 until
+# retention has run, stats.1 once it has, stats.2 once a snapshot exists. A
+# case that stages only stats.1 gets it at every stage, and the literal EXIT1
+# stands for a failed stats command. Staging by state is what lets a case prove
+# the quota decision reads the repository after retention rather than before.
 cat > "$work/bin/restic" <<'FAKE'
 #!/usr/bin/env bash
 printf 'restic %s\n' "$*" >> "$FAKE_CALLS"
 case "$1" in
   cat) [[ "$FAKE_MODE" == no-repo ]] && exit 1; echo '{"version":2}' ;;
+  stats)
+    stage=0
+    grep -q '^restic forget' "$FAKE_CALLS" && stage=1
+    grep -q '^restic backup' "$FAKE_CALLS" && stage=2
+    for candidate in "$stage" 1 0; do
+      [[ -f "$FAKE_STATS.$candidate" ]] && { fixture="$FAKE_STATS.$candidate"; break; }
+    done
+    # The fixture is written out byte for byte, so a NUL or any other byte a
+    # shell would silently drop reaches the script under test.
+    case "$(head -c 5 "$fixture")" in
+      EMPTY) exit 0 ;;
+      EXIT1) exit 1 ;;
+    esac
+    cat "$fixture" ;;
   backup)
+    [[ "$FAKE_MODE" == backup-fail ]] && exit 1
     cat > "$FAKE_STORE"
     echo '{"message_type":"status","percent_done":1}'
     echo '{"message_type":"summary","snapshot_id":"5e1f00d1c0ffee5e1f00d1c0ffee5e1f00d1c0ffee5e1f00d1c0ffee5e1f00d1","total_bytes_processed":21}' ;;
   dump)
-    if [[ "$FAKE_MODE" == corrupt ]]; then echo "different bytes"; else cat "$FAKE_STORE"; fi ;;
-  forget) echo "applying policy" ;;
+    if [[ "$FAKE_MODE" == corrupt ]]; then echo "different bytes"; else cat "$FAKE_STORE"; fi
+    [[ "$FAKE_MODE" == dump-exit1 ]] && exit 1
+    : ;;
+  forget)
+    [[ "$FAKE_MODE" == forget-fail ]] && exit 1
+    [[ "$FAKE_MODE" == forget-fail-after ]] && grep -q '^restic backup' "$FAKE_CALLS" && exit 1
+    echo "applying policy" ;;
   *) exit 99 ;;
 esac
 FAKE
@@ -67,9 +103,19 @@ run() {
   shift
   : > "$work/calls"
   rm -rf "$work/tmp" "$work/store"
+  rm -f "$work"/stats.*
+  printf '%s\n' "${STATS_1:-{\"total_size\":1024,\"snapshots_count\":3\}}" > "$work/stats.1"
+  [[ -n "$STATS_0" ]] && printf '%s\n' "$STATS_0" > "$work/stats.0"
+  [[ -n "$STATS_2" ]] && printf '%s\n' "$STATS_2" > "$work/stats.2"
+  # A raw fixture is a printf format, so a case can stage bytes a shell variable
+  # cannot carry, such as a NUL.
+  # shellcheck disable=SC2059
+  [[ -n "$STATS_1_RAW" ]] && printf "$STATS_1_RAW" > "$work/stats.1"
   code=0
-  output="$(env -i PATH="$work/bin:/usr/bin:/bin" FAKE_CALLS="$work/calls" FAKE_STORE="$work/store" \
-    FAKE_MODE="$mode" POCKETBOARD_BACKUP_ENV="$work/backup.env" POCKETBOARD_BACKUP_TMP="$work/tmp" \
+  output="$(env -i PATH="$work/bin:/usr/bin:/bin" ${ENV_OVERRIDE:+"$ENV_OVERRIDE"} \
+    FAKE_CALLS="$work/calls" FAKE_STORE="$work/store" \
+    FAKE_STATS="$work/stats" FAKE_MODE="$mode" FAKE_DUMP_BYTES="$DUMP_BYTES" \
+    POCKETBOARD_BACKUP_ENV="$work/backup.env" POCKETBOARD_BACKUP_TMP="$work/tmp" \
     POCKETBOARD_EXPECTED_OWNER_UID="$(id -u)" bash "$backup" "$@" 2>&1)" || code=$?
 }
 
@@ -85,6 +131,13 @@ check() {
 
 uploaded() { grep -q '^restic backup' "$work/calls"; }
 no_dump_left() { [[ -z "$(find "$work/tmp" -type f 2>/dev/null)" ]]; }
+# A one-line signature of what actually ran, so ordering is asserted directly.
+sequence() {
+  sed -E 's/^docker ps.*/find-db/; s/^docker exec.*pg_dump.*/dump/;
+    s/^docker exec.*pg_restore.*/verify-dump/; s/^restic cat.*/repo/;
+    s/^restic stats.*/stats/; s/^restic forget.*/retain/;
+    s/^restic backup.*/upload/; s/^restic dump.*/read-back/' "$work/calls" | paste -sd, -
+}
 
 write_env
 run ok "$sha"
@@ -95,7 +148,13 @@ check "a verified backup succeeds" '[[ $code == 0 && $output == *"verified backu
 check "the dump is streamed to restic under one stable path, tagged with the release" \
   'grep -q -- "--stdin --stdin-filename pocketboard.dump\$" "$work/calls" && grep -q -- "--tag sha-$sha" "$work/calls"'
 check "the uploaded snapshot is read back from that path" 'grep -q "^restic dump 5e1f00d1[0-9a-f]* /pocketboard.dump$" "$work/calls"'
-check "retention runs after the verified upload" 'grep -q -- "^restic forget .*--keep-daily 7 --keep-weekly 4 --keep-monthly 3 --prune" "$work/calls"'
+retention_line="^restic forget --host pocketboard --tag pocketboard --group-by host --keep-last 5 --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --prune\$"
+check "the whole accepted retention policy runs both before and after the upload" \
+  '(( $(grep -c -- "$retention_line" "$work/calls") == 2 ))'
+check "quota evidence comes from one repository-wide raw-data report, before and after" \
+  '(( $(grep -c -- "^restic stats --mode raw-data --json\$" "$work/calls") == 2 ))'
+check "the run keeps its order: verified dump, quota preflight, upload, read-back, quota postflight" \
+  '[[ "$(sequence)" == repo,find-db,dump,verify-dump,retain,stats,upload,read-back,retain,stats ]]'
 check "retention groups every PocketBoard snapshot together, not per tag or path" \
   'grep -q -- "^restic forget --host pocketboard --tag pocketboard --group-by host " "$work/calls"'
 check "the local dump is deleted" no_dump_left
@@ -116,6 +175,184 @@ check "an unreachable repository stops before dumping" '[[ $code == 1 ]] && ! gr
 
 run no-db "$sha"
 check "no running database container fails" '[[ $code == 1 ]] && ! uploaded'
+
+# --- Quota guard (issue #37) ------------------------------------------------
+# The limits are source-controlled, so these cases name the same numbers the
+# script does: 104857600 bytes (100 MiB) per dump, 2147483648 bytes (2 GiB) of
+# projected raw data, and 20 snapshots.
+DUMP_BYTES=$((100 * 1024 * 1024 + 1)) run ok "$sha"
+check "a dump one byte over the 100 MiB limit is rejected before any restic backup" \
+  '[[ $code == 1 && $output == *"104857601 bytes"* && $output == *"104857600"* ]] && ! uploaded'
+
+DUMP_BYTES=$((100 * 1024 * 1024)) run ok "$sha"
+check "a dump at exactly the 100 MiB limit is still backed up" \
+  '[[ $code == 0 && $output == *"verified backup"* ]] && uploaded'
+
+STATS_1='{"total_size":2147483628,"snapshots_count":3}' run ok "$sha"
+check "raw data plus the whole dump one byte over 2 GiB is rejected before any upload" \
+  '[[ $code == 1 && $output == *"2147483649"* && $output == *"2147483648"* ]] && ! uploaded'
+
+STATS_1='{"total_size":2147483627,"snapshots_count":3}' run ok "$sha"
+check "raw data plus the whole dump at exactly 2 GiB is still backed up" \
+  '[[ $code == 0 && $output == *"verified backup"* ]] && uploaded'
+
+STATS_1='{"total_size":1024,"snapshots_count":20}' run ok "$sha"
+check "a repository already holding the 20 allowed snapshots takes no new one" \
+  '[[ $code == 1 && $output == *"holds 20 snapshot"* ]] && ! uploaded'
+
+STATS_1='{"total_size":1024,"snapshots_count":19}' run ok "$sha"
+check "a repository holding 19 snapshots still takes the twentieth" \
+  '[[ $code == 0 && $output == *"verified backup"* ]] && uploaded'
+
+# Staged by repository state: 31 snapshots and nearly 2 GiB before retention, 5
+# snapshots after it. Passing proves the decision reads the repository Restic
+# leaves behind; an implementation that measured first would be refused here.
+STATS_0='{"total_size":2147483647,"snapshots_count":31}' \
+  STATS_1='{"total_size":1024,"snapshots_count":5}' run ok "$sha"
+check "mandatory retention brings an over-full repository back under the limits" \
+  '[[ $code == 0 && $output == *"verified backup"* && $output == *"5 snapshot"* ]] && uploaded'
+
+run forget-fail "$sha"
+check "a failed retention before the upload stops the deploy with nothing uploaded" \
+  '[[ $code == 1 && $output == *"retention"* && $output == *"before the upload"* ]] && ! uploaded'
+
+run forget-fail-after "$sha"
+check "a failed retention after the verified upload still fails the deploy" \
+  '[[ $code == 1 && $output == *"retention"* && $output == *"after the verified upload"* ]] && uploaded && no_dump_left'
+
+STATS_2='{"total_size":1024,"snapshots_count":21}' run ok "$sha"
+check "more than 20 snapshots after the upload fails the deploy" \
+  '[[ $code == 1 && $output == *"holds 21 snapshot"* ]] && no_dump_left'
+
+STATS_2='{"total_size":1024,"snapshots_count":20}' run ok "$sha"
+check "exactly 20 snapshots after the upload is accepted" \
+  '[[ $code == 0 && $output == *"verified backup"* ]]'
+
+STATS_2='{"total_size":2147483649,"snapshots_count":3}' run ok "$sha"
+check "raw data over 2 GiB after the upload fails the deploy" \
+  '[[ $code == 1 && $output == *"2147483649 bytes of raw data"* ]] && no_dump_left'
+
+# Real restic 0.16.4 output for a repository that has only been initialised.
+STATS_1='{"total_size":0,"snapshots_count":0}' run ok "$sha"
+check "an empty initialised repository takes its first backup" \
+  '[[ $code == 0 && $output == *"verified backup"* ]] && uploaded'
+
+# Only a single, unambiguous, plainly non-negative integer of at most 15 digits
+# counts as evidence. Anything else stops the deploy with nothing uploaded
+# rather than being read as a small number.
+untrustworthy=(
+  'a failed stats command|EXIT1'
+  'no output at all|EMPTY'
+  'a missing total_size|{"snapshots_count":3}'
+  'a missing snapshots_count|{"total_size":1024}'
+  'a non-numeric size|{"total_size":"many","snapshots_count":3}'
+  'a negative size|{"total_size":-1,"snapshots_count":3}'
+  'a signed size|{"total_size":+1024,"snapshots_count":3}'
+  'a fractional size|{"total_size":1.5,"snapshots_count":3}'
+  'a size too large to trust|{"total_size":1000000000000000000,"snapshots_count":3}'
+  'a zero-padded size|{"total_size":0999,"snapshots_count":3}'
+  'a repeated key|{"total_size":1024,"total_size":2147483647,"snapshots_count":3}'
+  'an unterminated object|{"total_size":1024,"snapshots_count":3'
+  'text that is not JSON|restic: stats unavailable'
+  # PR #38 review, finding 1: ambiguous evidence must not quietly resolve to the
+  # first readable number. All but the nested case uploaded before the fix.
+  'a key repeated with different spacing|{"total_size":0,"total_size" :2147483649,"snapshots_count":3}'
+  'a repeated snapshot count|{"total_size":0,"snapshots_count":3,"snapshots_count" :99}'
+  'two objects on one line|{"total_size":0}{"snapshots_count":3}'
+  'a nested object|{"total_size":{"nested":1},"snapshots_count":3}'
+  # PR #38 re-review, finding 1: a duplicate key spelled as a JSON escape, and
+  # malformed object contents, are still ambiguous evidence. Counting key text
+  # cannot see either, so the whole payload is matched against the shape Restic
+  # actually emits.
+  'a duplicate key escaped as \u005f|{"total_size":0,"total\u005fsize":2147483649,"snapshots_count":3}'
+  'a duplicate count escaped as \u005f|{"total_size":0,"snapshots_count":3,"snapshots\u005fcount":99}'
+  'a trailing comma|{"total_size":0,"snapshots_count":3,}'
+  'a string value|{"total_size":0,"snapshots_count":3,"note":"x"}'
+  'a duplicated unrelated key|{"total_size":0,"total_blob_count":1,"total_blob_count":2,"snapshots_count":3}'
+  'a key with a capital letter|{"Total_size":0,"snapshots_count":3}'
+  # PR #38 third pass: JSON forbids a leading zero, and the field carrying it
+  # need not be one the quota reads for the reply to be malformed.
+  'a leading zero in another field|{"total_size":0,"total_blob_count":01,"snapshots_count":3}'
+)
+untrustworthy+=('two objects|{"total_size":1024,"snapshots_count":3}'$'\n''{"total_size":9,"snapshots_count":1}')
+for entry in "${untrustworthy[@]}"; do
+  STATS_1="${entry#*|}" run ok "$sha"
+  check "${entry%%|*} is not usable quota evidence, so nothing is uploaded" \
+    '[[ $code == 1 && $output == *"FAILED: restic "* ]] && ! uploaded && no_dump_left'
+done
+
+STATS_1='{"total_size":2147483628,"snapshots_count":3}' run ok "$sha"
+check "a quota rejection still deletes the temporary dump and names no secret" \
+  'no_dump_left && [[ $output != *test-only* ]]'
+
+# Command failures one at a time (PR #38 review, finding 2).
+run backup-fail "$sha"
+check "a failed restic backup fails the deploy and reads nothing back" \
+  '[[ $code != 0 ]] && ! grep -q "^restic dump" "$work/calls" && no_dump_left'
+
+run dump-exit1 "$sha"
+check "a read-back that emits the right bytes but exits non-zero still fails" \
+  '[[ $code != 0 && $output != *"verified backup"* ]] && no_dump_left'
+
+STATS_2='{"total_size":1024,"snapshots_count":"three"}' run ok "$sha"
+check "untrustworthy evidence after the upload also fails the deploy" \
+  '[[ $code == 1 && $output == *"FAILED: restic "* ]] && uploaded && no_dump_left'
+
+STATS_2='{"total_size":2147483648,"snapshots_count":3}' run ok "$sha"
+check "exactly 2 GiB of raw data after the upload is accepted" \
+  '[[ $code == 0 && $output == *"verified backup"* ]]'
+
+# The reply real Restic 0.16.4 writes must keep working: the grammar above is a
+# whitelist, so a case has to fail if it ever narrows past the real thing
+# (PR #38 third pass).
+STATS_1='{"total_size":2251,"total_uncompressed_size":2344,"compression_ratio":1.0413149711239449,"compression_progress":100,"compression_space_saving":3.967576791808869,"total_blob_count":2,"snapshots_count":1}' run ok "$sha"
+check "the populated reply restic 0.16.4 writes, compression fields and all, is accepted" \
+  '[[ $code == 0 && $output == *"verified backup"* ]] && uploaded'
+
+STATS_1='{"total_size":0,"compression_space_saving":1e-07,"snapshots_count":3}' run ok "$sha"
+check "a float in scientific notation in another field is accepted" \
+  '[[ $code == 0 && $output == *"verified backup"* ]] && uploaded'
+
+# One constant per case, each with a scenario that crosses only that limit:
+# sourcing stops at the first readonly assignment, so a combined fixture would
+# leave the others unproven (PR #38 third pass, finding 2).
+write_env
+printf 'max_dump_bytes=999999999999\n' >> "$work/backup.env"
+DUMP_BYTES=$((100 * 1024 * 1024 + 1)) run ok "$sha"
+check "backup.env cannot raise the dump limit" '[[ $code != 0 ]] && ! uploaded && no_dump_left'
+
+write_env
+printf 'max_raw_bytes=999999999999\n' >> "$work/backup.env"
+STATS_1='{"total_size":2147483628,"snapshots_count":3}' run ok "$sha"
+check "backup.env cannot raise the raw-data limit" '[[ $code != 0 ]] && ! uploaded && no_dump_left'
+
+write_env
+printf 'max_snapshots=9999\n' >> "$work/backup.env"
+STATS_1='{"total_size":1024,"snapshots_count":20}' run ok "$sha"
+check "backup.env cannot raise the snapshot limit" '[[ $code != 0 ]] && ! uploaded && no_dump_left'
+write_env
+
+# The constants are assigned before anything is read, so an inherited value is
+# overwritten rather than honoured, and the real limit still reports itself.
+ENV_OVERRIDE="max_dump_bytes=999999999999" DUMP_BYTES=$((100 * 1024 * 1024 + 1)) run ok "$sha"
+check "the host environment cannot raise a limit" \
+  '[[ $code == 1 && $output == *"104857600 bytes (100 MiB)"* ]] && ! uploaded'
+
+# Remaining single command failures (PR #38 re-review, finding 2).
+run dump-fail "$sha"
+check "a failed pg_dump stops the deploy before any restic write" \
+  '[[ $code != 0 ]] && ! uploaded && ! grep -q "^restic forget" "$work/calls" && no_dump_left'
+
+STATS_2=EXIT1 run ok "$sha"
+check "a failed statistics command after the upload fails the deploy and cleans up" \
+  '[[ $code == 1 && $output == *"FAILED: restic could not report"* ]] && uploaded && no_dump_left'
+
+# Bash drops NUL bytes when it reads a command's output into a string, which
+# would turn an unreadable reply into a plausible one (PR #38 third pass).
+STATS_1_RAW='{"total_size":0,\000"snapshots_count":3}\n' run ok "$sha"
+check "a reply carrying a NUL byte is not usable quota evidence" \
+  '[[ $code == 1 && $output == *"FAILED: restic "* ]] && ! uploaded && no_dump_left'
+# --- end quota cases -------------------------------------------------------
 
 write_env 644
 run ok "$sha"

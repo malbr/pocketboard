@@ -7,9 +7,13 @@
 #
 # 1. Dump the running PostgreSQL container to a root-only temporary file.
 # 2. Prove the dump is a readable pg_dump archive before uploading it.
-# 3. Upload it to the Restic repository on Cloudflare R2 (encrypted by Restic).
-# 4. Read the snapshot back and require the same SHA-256 as the local dump.
-# 5. Delete the local dump on every exit path.
+# 3. Refuse an oversized dump, apply retention, and refuse the upload unless
+#    Restic's own machine-readable evidence shows the repository stays inside
+#    the source-controlled limits below (issue #37).
+# 4. Upload it to the Restic repository on Cloudflare R2 (encrypted by Restic).
+# 5. Read the snapshot back and require the same SHA-256 as the local dump.
+# 6. Apply retention again and re-check the limits over the new snapshot.
+# 7. Delete the local dump on every exit path.
 # Any failure exits non-zero, which stops the deploy before migrations run.
 # Output names the snapshot, size and checksum only; never credentials.
 set -euo pipefail
@@ -19,8 +23,81 @@ env_file="${POCKETBOARD_BACKUP_ENV:-/etc/pocketboard/backup.env}"
 tmp_root="${POCKETBOARD_BACKUP_TMP:-/var/lib/pocketboard/backup-tmp}"
 owner_uid="${POCKETBOARD_EXPECTED_OWNER_UID:-0}"
 
+# Cost guard (issue #37). These limits are source-controlled on purpose, and
+# read-only before backup.env is sourced, so neither the environment nor the
+# settings file can raise them: relaxing one takes a reviewed repository
+# change. They bound what this POC can store in R2; they are not a billing cap.
+readonly max_dump_bytes=$((100 * 1024 * 1024))
+readonly max_raw_bytes=$((2 * 1024 * 1024 * 1024))
+readonly max_snapshots=20
+
 log() { printf '%s backup: %s\n' "$(date -u +%FT%TZ)" "$*"; }
 die() { log "FAILED: $*" >&2; exit 1; }
+
+# Retention is mandatory in both places it runs. It is what keeps a POC
+# repository inside the limits above, so a failed forget/prune stops the deploy
+# instead of being reported (issue #37; it used to be a warning).
+retain() { # <stage>
+  restic forget --host pocketboard --tag pocketboard --group-by host --keep-last 5 \
+    --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --prune > /dev/null \
+    || die "retention (restic forget --prune) failed $1"
+}
+
+# Restic 0.16.4 prints one JSON object for `stats --json`, down to
+# {"total_size":0,"snapshots_count":0} on an empty repository. Only an
+# unambiguous, plainly non-negative integer of at most 15 digits counts as
+# evidence: a missing, repeated, signed, fractional or implausibly large field
+# is a failure rather than a zero, because the quota decisions rest entirely on
+# these two numbers. The digit bound also keeps the arithmetic below inside
+# Bash's signed 64-bit range.
+restic_number() { # <validated statistics json> <key>
+  local json="$1" key="$2" hits value
+  # read_quota_evidence has already proved the payload's shape and that its keys
+  # are unique, so this only has to find the one pair and bound its value.
+  hits="$(grep -o -- "\"$key\":" <<< "$json" | wc -l || true)"
+  (( hits == 1 )) || return 1
+  value="$(sed -n "s/.*\"$key\":\([^,}]*\).*/\1/p" <<< "$json")"
+  # Zero padding is refused with the rest: Bash would read 0999 as an invalid
+  # octal literal and abort the arithmetic instead of rejecting the evidence.
+  [[ "$value" =~ ^(0|[1-9][0-9]{0,14})$ ]] || return 1
+  printf '%s' "$value"
+}
+
+# Sets raw_bytes and snapshot_count from one repository-wide report, or exits.
+#
+# Restic 0.16.4 prints one flat JSON object of "key":<number> pairs, down to
+# {"total_size":0,"snapshots_count":0} on a repository that has only been
+# initialised. The whole payload is matched against that grammar before anything
+# is read out of it, because searching for keys in text cannot tell evidence
+# from noise: a field duplicated as a JSON escape ("total\u005fsize"), a
+# trailing comma or a string value all read as a clean small number otherwise
+# (PR #38 re-review, finding 1). Anything outside the grammar fails closed,
+# including a future Restic that adds a non-numeric field, which is why ADR 0009
+# makes re-verifying this parser part of a Restic upgrade.
+read_quota_evidence() {
+  local json pair keys reply="$work/stats.json"
+  restic stats --mode raw-data --json > "$reply" \
+    || die "restic could not report repository size and snapshot evidence"
+  json="$(cat "$reply")"
+  # Bash discards NUL bytes when it reads a command's output into a string, so an
+  # unreadable reply could arrive as a plausible one. Compare what Restic wrote
+  # with what survives that conversion before trusting the string below
+  # (PR #38 third pass).
+  (( $(wc -c < "$reply") == $(tr -d '\000' < "$reply" | wc -c) )) \
+    || die "restic statistics contain bytes this check cannot read"
+  # The number grammar is JSON's, so a spelling JSON forbids is refused even in a
+  # field the quota never reads: a reply that is not valid JSON is not evidence.
+  pair='"[a-z_]+":-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?'
+  [[ "$json" =~ ^[{]${pair}(,${pair})*[}]$ ]] \
+    || die "restic statistics are not the flat JSON object this check reads"
+  keys="$(grep -o -- '"[a-z_]*":' <<< "$json" | sort)"
+  (( $(wc -l <<< "$keys") == $(sort -u <<< "$keys" | wc -l) )) \
+    || die "restic statistics repeat a field, so the evidence is ambiguous"
+  raw_bytes="$(restic_number "$json" total_size)" \
+    || die "restic reported no usable total_size for the repository"
+  snapshot_count="$(restic_number "$json" snapshots_count)" \
+    || die "restic reported no usable snapshots_count for the repository"
+}
 
 if [[ $# -ne 1 || ! "$1" =~ ^[0-9a-f]{40}$ ]]; then
   echo "usage: pocketboard-backup <40-character release sha>" >&2
@@ -60,6 +137,25 @@ local_sum="$(sha256sum "$dump" | cut -d' ' -f1)"
 bytes="$(stat -c %s "$dump")"
 log "local dump verified: $bytes bytes, $(grep -c '^[0-9]' "$work/toc" || true) archive entries, sha256 $local_sum"
 
+# Refused before any Restic command that could write to the repository, so an
+# oversized dump costs nothing.
+(( bytes <= max_dump_bytes )) || die \
+  "the dump is $bytes bytes and the limit is $max_dump_bytes bytes (100 MiB)"
+
+# Quota preflight. Retention runs first and has to succeed: a repository that
+# already sits at the snapshot limit must be able to come back under it, and
+# the decision is only trustworthy on the repository Restic leaves behind.
+# The whole dump size is charged to the projection even though Restic will
+# deduplicate and compress it, which keeps the estimate conservative.
+retain "before the upload"
+read_quota_evidence
+projected=$(( raw_bytes + bytes ))
+(( projected <= max_raw_bytes )) || die \
+  "the upload would project $projected bytes of raw data and the limit is $max_raw_bytes bytes (2 GiB)"
+(( snapshot_count < max_snapshots )) || die \
+  "the repository holds $snapshot_count snapshots and the limit is $max_snapshots"
+log "quota preflight: $raw_bytes bytes of raw data, $snapshot_count snapshot(s), projecting $projected bytes"
+
 # One stable path for every snapshot: Restic's retention groups by host and
 # path by default, and a per-run name would give each snapshot its own group.
 # The release is recorded in a tag and the time in the snapshot itself.
@@ -72,11 +168,17 @@ snapshot="$(grep -o '"snapshot_id":"[0-9a-f]*"' "$work/backup.json" | cut -d'"' 
 remote_sum="$(restic dump "$snapshot" "/$name" | sha256sum | cut -d' ' -f1)"
 [[ "$remote_sum" == "$local_sum" ]] || die "snapshot $snapshot does not match the local dump"
 
-# Retention is housekeeping; a verified snapshot already exists, so a failure
-# here is reported without blocking the deploy. Grouping by host alone keeps
-# the per-release tags from splitting snapshots into groups of one.
-restic forget --host pocketboard --tag pocketboard --group-by host --keep-last 5 \
-  --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --prune > /dev/null \
-  || log "WARNING: retention (restic forget --prune) failed; the new snapshot is unaffected"
+# Quota postflight: retention again, then the same evidence re-read over the new
+# snapshot. An upload that took the repository past a limit stops this deploy
+# even though the snapshot itself is verified. Refusing here does not undo the
+# upload, so it can repeat until the repository is made smaller; what it buys is
+# that the deploy stops now instead of the limit surfacing on a later run.
+retain "after the verified upload"
+read_quota_evidence
+(( raw_bytes <= max_raw_bytes )) || die \
+  "the repository holds $raw_bytes bytes of raw data and the limit is $max_raw_bytes bytes (2 GiB)"
+(( snapshot_count <= max_snapshots )) || die \
+  "the repository holds $snapshot_count snapshots and the limit is $max_snapshots"
+log "quota postflight: $raw_bytes bytes of raw data, $snapshot_count snapshot(s)"
 
 log "verified backup: snapshot $snapshot, file /$name, $bytes bytes, sha256 $local_sum"
