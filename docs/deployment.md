@@ -49,8 +49,9 @@ For a deploy, the root script then:
    the deploy. A database that exists but is stopped is refused: the new
    release's definition must not be what starts it. `pocketboard-backup` dumps the
    database, proves the dump readable with `pg_restore --list`, uploads it
-   with Restic to R2, and reads it back to compare SHA-256. No verified backup
-   means no database change.
+   with Restic to R2, and reads it back to compare SHA-256. It also refuses to
+   upload outside the quota limits below. No verified backup means no database
+   change.
 4. Applies the release's PostgreSQL definition (`compose up postgres`), which
    may recreate the database container, then runs the `migrate` service once.
    Drizzle's ledger skips migrations already applied.
@@ -279,13 +280,80 @@ root, or every deploy and rollback is refused.
 
 Every deploy takes a pre-deploy snapshot with host `pocketboard`, tags
 `pocketboard`, `pre-deploy` and `sha-<release>`, and the single path
-`/pocketboard.dump`. Retention runs after each verified backup:
+`/pocketboard.dump`. Retention runs twice per backup, once before the upload and
+again after the snapshot is verified:
 `restic forget --host pocketboard --tag pocketboard --group-by host
 --keep-last 5 --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --prune`.
 Grouping by host alone matters: Restic groups by host and path by default, so
 a per-run path or grouping by the per-release tag would put every snapshot in
-its own group and keep all of them. A retention failure is reported without
-failing the deploy, because the verified snapshot already exists.
+its own group and keep all of them. Retention is mandatory, not housekeeping: a
+failed `forget`/`prune` fails the backup and therefore the deploy, because
+retention is what keeps the repository inside the limits below.
+
+### Quota limits
+
+`pocketboard-backup` refuses to upload unless the repository stays inside three
+limits (ADR 0009):
+
+| Limit | Value |
+| --- | --- |
+| One verified dump | 100 MiB (104857600 bytes) |
+| Restic raw data, including this upload | 2 GiB (2147483648 bytes) |
+| Snapshots in the repository | 20 |
+
+The dump is measured before any Restic command that could write to the
+repository. Raw data and the snapshot count are then measured after retention
+has run, and the whole dump size is charged against the raw-data limit even
+though Restic deduplicates and compresses it. Equality passes. The count must be
+under 20 before the upload and at most 20 after it, and both limits are checked
+again over the new snapshot, so an upload that took the repository over a limit
+stops this deploy rather than the next one.
+
+The numbers live in `deploy/vps/pocketboard-backup` and are read-only before
+`backup.env` is sourced. No environment variable, flag or settings entry raises
+them: changing a limit takes a reviewed repository change and a release, which
+is the point.
+
+The evidence comes from `restic stats --mode raw-data --json`, which reports
+`total_size` and `snapshots_count` for the whole repository. Evidence that is
+missing, repeated, non-numeric, negative, fractional, zero-padded or too large to
+trust is a failure rather than a zero: the backup stops and the deploy stops with
+it.
+
+**Diagnosing a rejection.** The Deploy log carries one `backup: FAILED: …` line
+naming the measured numbers:
+
+- `the dump is <n> bytes and the limit is 104857600 bytes (100 MiB)` — the
+  database outgrew the POC limit. Nothing was uploaded.
+- `the upload would project <n> bytes of raw data and the limit is 2147483648
+  bytes (2 GiB)` — the repository is near full even after retention. Nothing was
+  uploaded.
+- `the repository holds <n> snapshots and the limit is 20` — retention could not
+  bring the count under 20, or the new snapshot took it over.
+- `retention (restic forget --prune) failed …` — R2 or the repository refused the
+  operation that keeps the limits reachable.
+- `restic could not report …`, `restic did not report one JSON statistics
+  object`, `restic reported no usable total_size`/`snapshots_count` — Restic gave
+  nothing the guard will act on. Check the repository is reachable and that
+  `restic version` is still 0.16.4.
+
+As root, the same evidence by hand:
+
+```sh
+( set -a; . /etc/pocketboard/backup.env; restic stats --mode raw-data --json )
+```
+
+A rejection changes nothing: the database, the running application and the
+existing snapshots are untouched, and the temporary dump is deleted on every exit
+path. Because the backup runs before anything changes the database, a rejection
+stops the deploy instead of leaving it half-applied. Recovering means making the
+repository smaller (a human-approved `restic forget` of specific snapshots) or
+raising a limit through a reviewed change, not editing anything on the VPS.
+
+**What this does not do.** The limits bound what PocketBoard stores in R2. They
+are not a Cloudflare billing cap: R2 also bills for operations and for overhead
+the guard cannot see, so this reduces cost risk rather than eliminating it.
+Cloudflare's own billing notifications remain the backstop.
 
 ## Recovery
 
