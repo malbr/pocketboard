@@ -18,6 +18,15 @@ STATS_1=""
 STATS_2=""
 STATS_1_RAW=""
 ENV_OVERRIDE=""
+WARN=""
+# The wording Restic 0.16.4 prints for a snapshot it cannot load (issue #39).
+WARNING='Ignoring "5e1f00d1": failed to load snapshot 5e1f00d1: invalid data returned'
+FAIL=""
+HIDDEN=""
+LIST_JUNK=""
+FAIL_TOOL=""
+FAIL_ARGS="*"
+FAIL_PHASE=""
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -25,6 +34,8 @@ mkdir -p "$work/bin"
 
 cat > "$work/bin/docker" <<'FAKE'
 #!/usr/bin/env bash
+# The fakes use the real utilities, never a failing one staged for the script.
+PATH=/usr/bin:/bin
 printf 'docker %s\n' "$*" >> "$FAKE_CALLS"
 case "$1" in
   ps) [[ "$FAKE_MODE" == no-db ]] || echo "pgcid" ;;
@@ -49,18 +60,36 @@ FAKE
 # case that stages only stats.1 gets it at every stage, and the literal EXIT1
 # stands for a failed stats command. Staging by state is what lets a case prove
 # the quota decision reads the repository after retention rather than before.
+#
+# `restic list snapshots` names one snapshot file per snapshot the staged stats
+# counted, as it does on a healthy repository. Three knobs take a list of
+# <command>:<phase> words, the phase being pre or post the upload:
+#   FAKE_WARN   the command writes a warning to stderr and still exits 0,
+#               as Restic 0.16.4 does when it skips a snapshot it cannot load;
+#   FAKE_FAIL   the command writes its normal output, then exits 42;
+#   FAKE_HIDDEN (list only) one more snapshot file exists than stats counted.
 cat > "$work/bin/restic" <<'FAKE'
 #!/usr/bin/env bash
+PATH=/usr/bin:/bin
 printf 'restic %s\n' "$*" >> "$FAKE_CALLS"
+phase=pre
+grep -q '^restic backup' "$FAKE_CALLS" && phase=post
+staged() { [[ " $1 " == *" $2:$phase "* ]]; }
+# The warning carries the backup.env secret, so a case can prove that nothing
+# Restic writes to stderr is echoed.
+staged "${FAKE_WARN:-}" "$1" && printf '%s (%s)\n' "$FAKE_WARNING" "${AWS_SECRET_ACCESS_KEY:-}" >&2
+fixture() {
+  local stage=0 candidate
+  grep -q '^restic forget' "$FAKE_CALLS" && stage=1
+  grep -q '^restic backup' "$FAKE_CALLS" && stage=2
+  for candidate in "$stage" 1 0; do
+    [[ -f "$FAKE_STATS.$candidate" ]] && { printf '%s' "$FAKE_STATS.$candidate"; return; }
+  done
+}
 case "$1" in
   cat) [[ "$FAKE_MODE" == no-repo ]] && exit 1; echo '{"version":2}' ;;
   stats)
-    stage=0
-    grep -q '^restic forget' "$FAKE_CALLS" && stage=1
-    grep -q '^restic backup' "$FAKE_CALLS" && stage=2
-    for candidate in "$stage" 1 0; do
-      [[ -f "$FAKE_STATS.$candidate" ]] && { fixture="$FAKE_STATS.$candidate"; break; }
-    done
+    fixture="$(fixture)"
     # The fixture is written out byte for byte, so a NUL or any other byte a
     # shell would silently drop reaches the script under test.
     case "$(head -c 5 "$fixture")" in
@@ -68,9 +97,22 @@ case "$1" in
       EXIT1) exit 1 ;;
     esac
     cat "$fixture" ;;
+  list)
+    [[ "$2" == snapshots ]] || exit 99
+    count="$(grep -o '"snapshots_count":[0-9]*' "$(fixture)" | head -n 1 | cut -d: -f2)"
+    count="$((10#${count:-0}))"
+    staged "${FAKE_HIDDEN:-}" list && count=$((count + 1))
+    # FAKE_LIST_JUNK, a printf format, stands in for the last id, so the number
+    # of entries still matches and only their content is wrong.
+    [[ -n "${FAKE_LIST_JUNK:-}" ]] && count=$((count - 1))
+    for (( i = 1; i <= count; i++ )); do printf '%064x\n' "$i"; done
+    # shellcheck disable=SC2059
+    [[ -n "${FAKE_LIST_JUNK:-}" ]] && printf "$FAKE_LIST_JUNK"
+    : ;;
   backup)
     [[ "$FAKE_MODE" == backup-fail ]] && exit 1
     cat > "$FAKE_STORE"
+    [[ "$FAKE_MODE" == no-snapshot-id ]] && { echo '{"message_type":"summary"}'; exit 0; }
     echo '{"message_type":"status","percent_done":1}'
     echo '{"message_type":"summary","snapshot_id":"5e1f00d1c0ffee5e1f00d1c0ffee5e1f00d1c0ffee5e1f00d1c0ffee5e1f00d1","total_bytes_processed":21}' ;;
   dump)
@@ -83,6 +125,8 @@ case "$1" in
     echo "applying policy" ;;
   *) exit 99 ;;
 esac
+staged "${FAKE_FAIL:-}" "$1" && exit 42
+exit 0
 FAKE
 chmod +x "$work/bin/docker" "$work/bin/restic"
 
@@ -111,9 +155,30 @@ run() {
   # cannot carry, such as a NUL.
   # shellcheck disable=SC2059
   [[ -n "$STATS_1_RAW" ]] && printf "$STATS_1_RAW" > "$work/stats.1"
+  # FAIL_TOOL puts a utility in front of the real one that does the real work,
+  # output and all, and then exits 42 when its arguments match the FAIL_ARGS
+  # glob, from the start or (FAIL_PHASE=post) only once the upload has run.
+  rm -rf "$work/failbin"
+  mkdir -p "$work/failbin"
+  if [[ -n "$FAIL_TOOL" ]]; then
+    cat > "$work/failbin/$FAIL_TOOL" <<SHIM
+#!/bin/bash
+/usr/bin/$FAIL_TOOL "\$@"
+status=\$?
+# shellcheck disable=SC2053
+if [[ "\$*" == \$FAIL_TOOL_ARGS ]] \\
+  && { [[ "\$FAIL_TOOL_PHASE" != post ]] || /usr/bin/grep -q '^restic backup' "\$FAKE_CALLS"; }; then
+  exit 42
+fi
+exit \$status
+SHIM
+    chmod +x "$work/failbin/$FAIL_TOOL"
+  fi
   code=0
-  output="$(env -i PATH="$work/bin:/usr/bin:/bin" ${ENV_OVERRIDE:+"$ENV_OVERRIDE"} \
+  output="$(env -i PATH="$work/failbin:$work/bin:/usr/bin:/bin" ${ENV_OVERRIDE:+"$ENV_OVERRIDE"} \
     FAKE_CALLS="$work/calls" FAKE_STORE="$work/store" \
+    FAKE_WARN="$WARN" FAKE_WARNING="$WARNING" FAKE_FAIL="$FAIL" FAKE_HIDDEN="$HIDDEN" \
+    FAKE_LIST_JUNK="$LIST_JUNK" FAIL_TOOL_ARGS="$FAIL_ARGS" FAIL_TOOL_PHASE="$FAIL_PHASE" \
     FAKE_STATS="$work/stats" FAKE_MODE="$mode" FAKE_DUMP_BYTES="$DUMP_BYTES" \
     POCKETBOARD_BACKUP_ENV="$work/backup.env" POCKETBOARD_BACKUP_TMP="$work/tmp" \
     POCKETBOARD_EXPECTED_OWNER_UID="$(id -u)" bash "$backup" "$@" 2>&1)" || code=$?
@@ -135,7 +200,7 @@ no_dump_left() { [[ -z "$(find "$work/tmp" -type f 2>/dev/null)" ]]; }
 sequence() {
   sed -E 's/^docker ps.*/find-db/; s/^docker exec.*pg_dump.*/dump/;
     s/^docker exec.*pg_restore.*/verify-dump/; s/^restic cat.*/repo/;
-    s/^restic stats.*/stats/; s/^restic forget.*/retain/;
+    s/^restic stats.*/stats/; s/^restic list snapshots$/list/; s/^restic forget.*/retain/;
     s/^restic backup.*/upload/; s/^restic dump.*/read-back/' "$work/calls" | paste -sd, -
 }
 
@@ -154,7 +219,7 @@ check "the whole accepted retention policy runs both before and after the upload
 check "quota evidence comes from one repository-wide raw-data report, before and after" \
   '(( $(grep -c -- "^restic stats --mode raw-data --json\$" "$work/calls") == 2 ))'
 check "the run keeps its order: verified dump, quota preflight, upload, read-back, quota postflight" \
-  '[[ "$(sequence)" == repo,find-db,dump,verify-dump,retain,stats,upload,read-back,retain,stats ]]'
+  '[[ "$(sequence)" == repo,find-db,dump,verify-dump,retain,stats,list,upload,read-back,retain,stats,list ]]'
 check "retention groups every PocketBoard snapshot together, not per tag or path" \
   'grep -q -- "^restic forget --host pocketboard --tag pocketboard --group-by host " "$work/calls"'
 check "the local dump is deleted" no_dump_left
@@ -352,6 +417,144 @@ check "a failed statistics command after the upload fails the deploy and cleans 
 STATS_1_RAW='{"total_size":0,\000"snapshots_count":3}\n' run ok "$sha"
 check "a reply carrying a NUL byte is not usable quota evidence" \
   '[[ $code == 1 && $output == *"FAILED: restic "* ]] && ! uploaded && no_dump_left'
+
+# --- Complete evidence (issue #39) -----------------------------------------
+# Restic 0.16.4 skips a snapshot it cannot load with a warning on stderr, exits
+# 0, and reports the rest; when it can load none, the report is exactly the one
+# an empty repository gives. Evidence is only usable when it is complete.
+refused_before_upload='[[ $code == 1 && $output == *"FAILED: "* && $output != *test-only* ]] && ! uploaded && no_dump_left'
+refused_after_upload='[[ $code == 1 && $output == *"FAILED: "* && $output != *"verified backup"* && $output != *test-only* ]] && uploaded && no_dump_left'
+
+WARN="stats:pre" run ok "$sha"
+check "statistics that warn before the upload are not usable evidence" "$refused_before_upload"
+WARN="stats:post" run ok "$sha"
+check "statistics that warn after the upload fail the deploy" "$refused_after_upload"
+# Retention reads snapshots through the same iterator, so a skipped snapshot is
+# one it neither kept nor removed.
+WARN="forget:pre" run ok "$sha"
+check "retention that warns before the upload stops the deploy with nothing uploaded" \
+  "$refused_before_upload"' && [[ $output == *"before the upload"* ]]'
+WARN="forget:post" run ok "$sha"
+check "retention that warns after the upload fails the deploy" \
+  "$refused_after_upload"' && [[ $output == *"after the verified upload"* ]]'
+# Any warning counts, not one particular wording.
+WARN="stats:pre forget:post" WARNING="avertissement: instantané illisible" run ok "$sha"
+check "a warning in any wording makes statistics unusable" "$refused_before_upload"
+WARN="forget:post" WARNING="?" run ok "$sha"
+check "a warning in any wording makes retention fail" "$refused_after_upload"
+
+# Nor does completeness rest on a warning being printed at all. `restic list
+# snapshots` names the snapshot files without loading them, so a report that
+# counts fewer snapshots than the repository holds is incomplete. This is the
+# unreadable repository the review found reported as an empty one.
+STATS_1='{"total_size":0,"snapshots_count":0}' HIDDEN="list:pre" run ok "$sha"
+check "an empty report over a repository that holds a snapshot is not usable evidence" \
+  "$refused_before_upload"' && [[ $output == *"1 snapshot file"* && $output == *"counted 0"* ]]'
+STATS_1='{"total_size":1024,"snapshots_count":3}' HIDDEN="list:pre" run ok "$sha"
+check "a report that counts fewer snapshots than the repository holds is refused before the upload" \
+  "$refused_before_upload"
+HIDDEN="list:post" run ok "$sha"
+check "a report that counts fewer snapshots after the upload fails the deploy" \
+  "$refused_after_upload"
+STATS_1='{"total_size":0,"snapshots_count":0}' run ok "$sha"
+check "a healthy empty repository, with no snapshot file at all, still takes its first backup" \
+  '[[ $code == 0 && $output == *"verified backup"* && $output == *"0 snapshot(s)"* ]] && uploaded'
+# The snapshot list is evidence too, and held to the same rules.
+FAIL="list:pre" run ok "$sha"
+check "a snapshot list that exits non-zero after a normal reply is refused before the upload" \
+  "$refused_before_upload"
+FAIL="list:post" run ok "$sha"
+check "a snapshot list that exits non-zero after the upload fails the deploy" "$refused_after_upload"
+WARN="list:pre" run ok "$sha"
+check "a snapshot list that warns is not usable evidence" "$refused_before_upload"
+WARN="list:post" run ok "$sha"
+check "a snapshot list that warns after the upload fails the deploy" "$refused_after_upload"
+id64="$(printf '%064x' 0xabcdef)"
+junk_lists=(
+  'a line that is not a snapshot id|not-a-snapshot-id\n'
+  'a short id|abc123\n'
+  'an id followed by a NUL byte|'"$id64"'\000\n'
+  'an id with no final newline|'"$id64"
+  'an id in capitals|'"${id64^^}"'\n'
+)
+for entry in "${junk_lists[@]}"; do
+  LIST_JUNK="${entry#*|}" run ok "$sha"
+  check "a snapshot list with ${entry%%|*} is not usable evidence" "$refused_before_upload"
+done
+
+# Every utility the checks rely on has to succeed, not just print something
+# plausible (PR #38 exact-final review, finding 2): each of these does its real
+# work, output and all, and then exits 42. The first four uploaded and reported
+# a verified backup before issue #39.
+validator_failures=(
+  'tr|*|the NUL comparison (tr)'
+  'wc|-c|the byte count (wc -c)'
+  'sort|-u|the unique-key count (sort -u)'
+  'sed|*|the number extraction (sed)'
+  'wc|-l|a line count (wc -l)'
+  'sort||the key listing (sort)'
+  'grep|-o -- "[[]*|the key search (grep)'
+  'grep|*total_size*|the number search (grep)'
+  'cat|*|reading the statistics (cat)'
+  'stat|-c %s */snapshots|measuring the snapshot list (stat)'
+)
+for entry in "${validator_failures[@]}"; do
+  IFS='|' read -r tool pattern description <<< "$entry"
+  FAIL_TOOL="$tool" FAIL_ARGS="$pattern" run ok "$sha"
+  check "a failure in $description after normal output refuses the upload" "$refused_before_upload"
+  FAIL_TOOL="$tool" FAIL_ARGS="$pattern" FAIL_PHASE=post run ok "$sha"
+  check "a failure in $description after the upload fails the deploy" "$refused_after_upload"
+done
+# The dump is measured once, before anything is uploaded.
+FAIL_TOOL=stat FAIL_ARGS='-c %s */pocketboard.dump' run ok "$sha"
+check "a failure measuring the dump (stat) after normal output refuses the upload" "$refused_before_upload"
+
+# Statistics that print a valid reply and then fail were already refused, and
+# must stay refused at both stages.
+FAIL="stats:pre" run ok "$sha"
+check "statistics that exit non-zero after a valid reply are refused before the upload" \
+  "$refused_before_upload"
+FAIL="stats:post" run ok "$sha"
+check "statistics that exit non-zero after a valid reply fail the deploy after the upload" \
+  "$refused_after_upload"
+
+# The strict whole-payload parser stays as it was: byte for byte, only the
+# compact object Restic 0.16.4 writes, with one LF at most after it.
+raw_untrustworthy=(
+  'a CRLF line ending|{"total_size":0,"snapshots_count":3}\r\n'
+  'a space inside the object|{"total_size": 0,"snapshots_count":3}\n'
+  'a pretty-printed object|{\n  "total_size": 0,\n  "snapshots_count": 3\n}\n'
+  'an embedded newline|{"total_size":0,\n"snapshots_count":3}\n'
+  'a byte-order mark|\357\273\277{"total_size":0,"snapshots_count":3}\n'
+  'invalid UTF-8|{"total_size":0,"snapshots_count":3}\377\n'
+  'a leading NUL|\000{"total_size":0,"snapshots_count":3}\n'
+  'a trailing NUL|{"total_size":0,"snapshots_count":3}\000\n'
+  'an exponent in the size|{"total_size":1e3,"snapshots_count":3}\n'
+  'a negative zero count|{"total_size":0,"snapshots_count":-0}\n'
+  'a size of 16 digits|{"total_size":1000000000000000,"snapshots_count":3}\n'
+  'a fractional count|{"total_size":0,"snapshots_count":3.0}\n'
+  'an unrelated invalid number|{"total_size":0,"total_blob_count":1.,"snapshots_count":3}\n'
+  'an unrelated signed number|{"total_size":0,"total_blob_count":+1,"snapshots_count":3}\n'
+)
+for entry in "${raw_untrustworthy[@]}"; do
+  STATS_1_RAW="${entry#*|}" run ok "$sha"
+  check "${entry%%|*} is not usable quota evidence" "$refused_before_upload"
+done
+STATS_1_RAW='{"total_size":0,"snapshots_count":3}\n' run ok "$sha"
+check "the compact reply with its single trailing LF is accepted" \
+  '[[ $code == 0 && $output == *"verified backup"* ]] && uploaded'
+
+# Inherited values cannot raise the other two limits either.
+ENV_OVERRIDE="max_raw_bytes=999999999999" STATS_1='{"total_size":2147483628,"snapshots_count":3}' run ok "$sha"
+check "the host environment cannot raise the raw-data limit" \
+  '[[ $code == 1 && $output == *"2147483648 bytes (2 GiB)"* ]] && ! uploaded'
+ENV_OVERRIDE="max_snapshots=9999" STATS_1='{"total_size":1024,"snapshots_count":20}' run ok "$sha"
+check "the host environment cannot raise the snapshot limit" \
+  '[[ $code == 1 && $output == *"limit is 20"* ]] && ! uploaded'
+
+run no-snapshot-id "$sha"
+check "an upload that reports no snapshot id fails the deploy and reads nothing back" \
+  '[[ $code != 0 && $output != *"verified backup"* ]] && uploaded && ! grep -q "^restic dump" "$work/calls" && no_dump_left'
 # --- end quota cases -------------------------------------------------------
 
 write_env 644

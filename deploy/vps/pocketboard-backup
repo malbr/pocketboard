@@ -8,8 +8,9 @@
 # 1. Dump the running PostgreSQL container to a root-only temporary file.
 # 2. Prove the dump is a readable pg_dump archive before uploading it.
 # 3. Refuse an oversized dump, apply retention, and refuse the upload unless
-#    Restic's own machine-readable evidence shows the repository stays inside
-#    the source-controlled limits below (issue #37).
+#    Restic's own machine-readable evidence, complete and free of warnings,
+#    shows the repository stays inside the source-controlled limits below
+#    (issues #37 and #39).
 # 4. Upload it to the Restic repository on Cloudflare R2 (encrypted by Restic).
 # 5. Read the snapshot back and require the same SHA-256 as the local dump.
 # 6. Apply retention again and re-check the limits over the new snapshot.
@@ -36,11 +37,16 @@ die() { log "FAILED: $*" >&2; exit 1; }
 
 # Retention is mandatory in both places it runs. It is what keeps a POC
 # repository inside the limits above, so a failed forget/prune stops the deploy
-# instead of being reported (issue #37; it used to be a warning).
+# instead of being reported (issue #37; it used to be a warning). A warning is a
+# failure too: Restic 0.16.4 skips a snapshot it cannot load, exits 0, and so
+# neither keeps nor removes it (issue #39). `forget --prune` only prunes when the
+# policy selects a snapshot to remove, so a run that removes none prunes nothing.
 retain() { # <stage>
   restic forget --host pocketboard --tag pocketboard --group-by host --keep-last 5 \
-    --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --prune > /dev/null \
+    --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --prune > /dev/null 2> "$work/retain.err" \
     || die "retention (restic forget --prune) failed $1"
+  [[ ! -s "$work/retain.err" ]] \
+    || die "retention (restic forget --prune) warned $1, so it may have skipped snapshots"
 }
 
 # Restic 0.16.4 prints one JSON object for `stats --json`, down to
@@ -53,17 +59,21 @@ retain() { # <stage>
 restic_number() { # <validated statistics json> <key>
   local json="$1" key="$2" hits value
   # read_quota_evidence has already proved the payload's shape and that its keys
-  # are unique, so this only has to find the one pair and bound its value.
-  hits="$(grep -o -- "\"$key\":" <<< "$json" | wc -l || true)"
-  (( hits == 1 )) || return 1
-  value="$(sed -n "s/.*\"$key\":\([^,}]*\).*/\1/p" <<< "$json")"
+  # are unique, so this only has to find the one pair and bound its value. It
+  # runs where errexit does not apply, so every step checks its own status: a
+  # utility that prints the right text and then fails is not evidence (PR #38
+  # exact-final review, finding 2). grep failing to find the key fails here too.
+  hits="$(grep -o -- "\"$key\":" <<< "$json" | wc -l)" || return 1
+  [[ "$hits" == 1 ]] || return 1
+  value="$(sed -n "s/.*\"$key\":\([^,}]*\).*/\1/p" <<< "$json")" || return 1
   # Zero padding is refused with the rest: Bash would read 0999 as an invalid
   # octal literal and abort the arithmetic instead of rejecting the evidence.
   [[ "$value" =~ ^(0|[1-9][0-9]{0,14})$ ]] || return 1
   printf '%s' "$value"
 }
 
-# Sets raw_bytes and snapshot_count from one repository-wide report, or exits.
+# Sets raw_bytes and snapshot_count from one repository-wide report, checked
+# against the repository's own list of snapshot files, or exits.
 #
 # Restic 0.16.4 prints one flat JSON object of "key":<number> pairs, down to
 # {"total_size":0,"snapshots_count":0} on a repository that has only been
@@ -75,28 +85,66 @@ restic_number() { # <validated statistics json> <key>
 # including a future Restic that adds a non-numeric field, which is why ADR 0009
 # makes re-verifying this parser part of a Restic upgrade.
 read_quota_evidence() {
-  local json pair keys reply="$work/stats.json"
-  restic stats --mode raw-data --json > "$reply" \
+  local json pair keys all_bytes kept_bytes key_count unique_count reply="$work/stats.json"
+  restic stats --mode raw-data --json > "$reply" 2> "$work/stats.err" \
     || die "restic could not report repository size and snapshot evidence"
-  json="$(cat "$reply")"
+  # Restic 0.16.4 skips a snapshot it cannot load with a warning, exits 0 and
+  # reports the rest, and when it loads none its report is exactly an empty
+  # repository's (issue #39). A healthy run writes nothing to stderr, so any
+  # warning at all, whatever its wording, makes the report incomplete. It is not
+  # echoed: the command is documented for reproducing it by hand.
+  [[ ! -s "$work/stats.err" ]] \
+    || die "restic warned while reporting the repository, so its evidence may be incomplete"
+  json="$(cat "$reply")" || die "the quota check could not read restic statistics"
   # Bash discards NUL bytes when it reads a command's output into a string, so an
   # unreadable reply could arrive as a plausible one. Compare what Restic wrote
   # with what survives that conversion before trusting the string below
-  # (PR #38 third pass).
-  (( $(wc -c < "$reply") == $(tr -d '\000' < "$reply" | wc -c) )) \
+  # (PR #38 third pass). Each count is captured and its status checked before
+  # the comparison, because (( )) ignores the status of the commands that
+  # produce its operands (PR #38 exact-final review, finding 2).
+  all_bytes="$(wc -c < "$reply")" || die "the quota check could not measure restic statistics"
+  kept_bytes="$(tr -d '\000' < "$reply" | wc -c)" \
+    || die "the quota check could not measure restic statistics"
+  [[ "$all_bytes" =~ ^[0-9]+$ && "$all_bytes" == "$kept_bytes" ]] \
     || die "restic statistics contain bytes this check cannot read"
   # The number grammar is JSON's, so a spelling JSON forbids is refused even in a
   # field the quota never reads: a reply that is not valid JSON is not evidence.
   pair='"[a-z_]+":-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?'
   [[ "$json" =~ ^[{]${pair}(,${pair})*[}]$ ]] \
     || die "restic statistics are not the flat JSON object this check reads"
-  keys="$(grep -o -- '"[a-z_]*":' <<< "$json" | sort)"
-  (( $(wc -l <<< "$keys") == $(sort -u <<< "$keys" | wc -l) )) \
+  keys="$(grep -o -- '"[a-z_]*":' <<< "$json" | sort)" \
+    || die "the quota check could not compare the fields of restic statistics"
+  key_count="$(wc -l <<< "$keys")" \
+    || die "the quota check could not compare the fields of restic statistics"
+  unique_count="$(sort -u <<< "$keys" | wc -l)" \
+    || die "the quota check could not compare the fields of restic statistics"
+  [[ "$key_count" =~ ^[1-9][0-9]*$ && "$key_count" == "$unique_count" ]] \
     || die "restic statistics repeat a field, so the evidence is ambiguous"
   raw_bytes="$(restic_number "$json" total_size)" \
     || die "restic reported no usable total_size for the repository"
   snapshot_count="$(restic_number "$json" snapshots_count)" \
     || die "restic reported no usable snapshots_count for the repository"
+
+  # A skipped snapshot need not be announced for the report to be incomplete.
+  # `restic list snapshots` names every snapshot file without loading one, so a
+  # report that counted fewer snapshots than there are files left some out
+  # (issue #39). The reply must be exactly one 64-hex id per line: its size is
+  # checked because Bash would silently drop a NUL from what it reads.
+  local ids id size
+  restic list snapshots > "$work/snapshots" 2> "$work/snapshots.err" \
+    || die "restic could not list the repository's snapshot files"
+  [[ ! -s "$work/snapshots.err" ]] \
+    || die "restic warned while listing the repository's snapshot files"
+  mapfile -t ids < "$work/snapshots"
+  size="$(stat -c %s "$work/snapshots")" \
+    || die "the snapshot file list could not be measured"
+  [[ "$size" =~ ^(0|[1-9][0-9]{0,14})$ && "$size" == "$(( 65 * ${#ids[@]} ))" ]] \
+    || die "restic listed snapshot files this check cannot read"
+  for id in "${ids[@]}"; do
+    [[ "$id" =~ ^[0-9a-f]{64}$ ]] || die "restic listed snapshot files this check cannot read"
+  done
+  (( ${#ids[@]} == snapshot_count )) || die "restic statistics counted $snapshot_count" \
+    "snapshot(s) but the repository holds ${#ids[@]} snapshot file(s), so the evidence is incomplete"
 }
 
 if [[ $# -ne 1 || ! "$1" =~ ^[0-9a-f]{40}$ ]]; then
@@ -134,11 +182,12 @@ docker exec "$pg" pg_dump --username=pocketboard --dbname=pocketboard --format=c
 [[ "$(head -c 5 "$dump")" == PGDMP ]] || die "pg_dump did not produce a custom-format archive"
 docker exec -i "$pg" pg_restore --list < "$dump" > "$work/toc" || die "pg_restore cannot read the dump"
 local_sum="$(sha256sum "$dump" | cut -d' ' -f1)"
-bytes="$(stat -c %s "$dump")"
+bytes="$(stat -c %s "$dump")" || die "the dump could not be measured"
 log "local dump verified: $bytes bytes, $(grep -c '^[0-9]' "$work/toc" || true) archive entries, sha256 $local_sum"
 
-# Refused before any Restic command that could write to the repository, so an
-# oversized dump costs nothing.
+# Refused before retention and before any upload. It is not refused before every
+# repository write: `restic cat config` above already took a lock, which in
+# Restic 0.16.4 writes and then removes a lock object (issue #39).
 (( bytes <= max_dump_bytes )) || die \
   "the dump is $bytes bytes and the limit is $max_dump_bytes bytes (100 MiB)"
 
