@@ -50,8 +50,10 @@ the initial POC.
   Restic encrypts off-VPS backups to Cloudflare R2 after a local temporary dump.
 - The pre-deploy backup enforces source-controlled POC quotas: one dump of at
   most 100 MiB, at most 2 GiB of Restic raw data, and at most 20 snapshots,
-  with mandatory retention and fail-closed Restic evidence (ADR 0009). No host
-  or environment setting can raise them.
+  with mandatory retention and fail-closed Restic evidence (ADR 0009) that must
+  also be complete: no Restic warning, and every snapshot file counted (ADR
+  0010). The verified snapshot must survive postflight retention (ADR 0011). No
+  host or environment setting can raise them.
 - Reuse the existing Uptime Kuma; add no other observability stack for the POC.
 - The production hostname is the POC-only `pocketboard.43-156-84-63.sslip.io`
   (ADR 0008); replace it with an owned domain if PocketBoard moves past a
