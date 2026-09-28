@@ -13,7 +13,8 @@
 #    (issues #37 and #39).
 # 4. Upload it to the Restic repository on Cloudflare R2 (encrypted by Restic).
 # 5. Read the snapshot back and require the same SHA-256 as the local dump.
-# 6. Apply retention again and re-check the limits over the new snapshot.
+# 6. Apply retention again, require the new snapshot to have survived it, and
+#    re-check the limits over it.
 # 7. Delete the local dump on every exit path.
 # Any failure exits non-zero, which stops the deploy before migrations run.
 # Output names the snapshot, size and checksum only; never credentials.
@@ -73,7 +74,8 @@ restic_number() { # <validated statistics json> <key>
 }
 
 # Sets raw_bytes and snapshot_count from one repository-wide report, checked
-# against the repository's own list of snapshot files, or exits.
+# against the repository's own list of snapshot files, and keeps that list in
+# listed_ids, or exits.
 #
 # Restic 0.16.4 prints one flat JSON object of "key":<number> pairs, down to
 # {"total_size":0,"snapshots_count":0} on a repository that has only been
@@ -95,7 +97,13 @@ read_quota_evidence() {
   # echoed: the command is documented for reproducing it by hand.
   [[ ! -s "$work/stats.err" ]] \
     || die "restic warned while reporting the repository, so its evidence may be incomplete"
-  json="$(cat "$reply")" || die "the quota check could not read restic statistics"
+  # Command substitution strips every trailing LF, which would pass a reply
+  # ending in several as one ending in none. The sentinel keeps them, then the
+  # single LF Restic writes is removed and any other is left for the grammar
+  # below to refuse (PR #40 review, finding 2). `&&` keeps cat's failure.
+  json="$(cat "$reply" && printf x)" || die "the quota check could not read restic statistics"
+  json="${json%x}"
+  json="${json%$'\n'}"
   # Bash discards NUL bytes when it reads a command's output into a string, so an
   # unreadable reply could arrive as a plausible one. Compare what Restic wrote
   # with what survives that conversion before trusting the string below
@@ -130,21 +138,21 @@ read_quota_evidence() {
   # report that counted fewer snapshots than there are files left some out
   # (issue #39). The reply must be exactly one 64-hex id per line: its size is
   # checked because Bash would silently drop a NUL from what it reads.
-  local ids id size
+  local id size
   restic list snapshots > "$work/snapshots" 2> "$work/snapshots.err" \
     || die "restic could not list the repository's snapshot files"
   [[ ! -s "$work/snapshots.err" ]] \
     || die "restic warned while listing the repository's snapshot files"
-  mapfile -t ids < "$work/snapshots"
+  mapfile -t listed_ids < "$work/snapshots"
   size="$(stat -c %s "$work/snapshots")" \
     || die "the snapshot file list could not be measured"
-  [[ "$size" =~ ^(0|[1-9][0-9]{0,14})$ && "$size" == "$(( 65 * ${#ids[@]} ))" ]] \
+  [[ "$size" =~ ^(0|[1-9][0-9]{0,14})$ && "$size" == "$(( 65 * ${#listed_ids[@]} ))" ]] \
     || die "restic listed snapshot files this check cannot read"
-  for id in "${ids[@]}"; do
+  for id in "${listed_ids[@]}"; do
     [[ "$id" =~ ^[0-9a-f]{64}$ ]] || die "restic listed snapshot files this check cannot read"
   done
-  (( ${#ids[@]} == snapshot_count )) || die "restic statistics counted $snapshot_count" \
-    "snapshot(s) but the repository holds ${#ids[@]} snapshot file(s), so the evidence is incomplete"
+  (( ${#listed_ids[@]} == snapshot_count )) || die "restic statistics counted $snapshot_count" \
+    "snapshot(s) but the repository holds ${#listed_ids[@]} snapshot file(s), so the evidence is incomplete"
 }
 
 if [[ $# -ne 1 || ! "$1" =~ ^[0-9a-f]{40}$ ]]; then
@@ -224,6 +232,17 @@ remote_sum="$(restic dump "$snapshot" "/$name" | sha256sum | cut -d' ' -f1)"
 # that the deploy stops now instead of the limit surfacing on a later run.
 retain "after the verified upload"
 read_quota_evidence
+# Retention keeps snapshots by their recorded time, not upload order, so seven
+# earlier snapshots dated later than this one, say from a host clock that ran
+# ahead, leave it outside every keep rule and it is forgotten. The size and
+# count can still look healthy, so the deploy stops unless the verified
+# snapshot is still in the repository (PR #40 review, finding 1).
+survived=no
+for id in "${listed_ids[@]}"; do
+  [[ "$id" == "$snapshot" ]] && survived=yes
+done
+[[ "$survived" == yes ]] || die "retention removed the verified snapshot $snapshot, so this deploy has" \
+  "no pre-deploy backup; check the host clock and the snapshot times"
 (( raw_bytes <= max_raw_bytes )) || die \
   "the repository holds $raw_bytes bytes of raw data and the limit is $max_raw_bytes bytes (2 GiB)"
 (( snapshot_count <= max_snapshots )) || die \

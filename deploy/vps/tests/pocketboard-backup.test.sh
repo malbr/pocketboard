@@ -62,7 +62,9 @@ FAKE
 # the quota decision reads the repository after retention rather than before.
 #
 # `restic list snapshots` names one snapshot file per snapshot the staged stats
-# counted, as it does on a healthy repository. Three knobs take a list of
+# counted, as it does on a healthy repository, the uploaded snapshot among them
+# once it exists, unless FAKE_MODE=upload-forgotten says retention removed it.
+# Three knobs take a list of
 # <command>:<phase> words, the phase being pre or post the upload:
 #   FAKE_WARN   the command writes a warning to stderr and still exits 0,
 #               as Restic 0.16.4 does when it skips a snapshot it cannot load;
@@ -75,6 +77,7 @@ printf 'restic %s\n' "$*" >> "$FAKE_CALLS"
 phase=pre
 grep -q '^restic backup' "$FAKE_CALLS" && phase=post
 staged() { [[ " $1 " == *" $2:$phase "* ]]; }
+uploaded=5e1f00d1c0ffee5e1f00d1c0ffee5e1f00d1c0ffee5e1f00d1c0ffee5e1f00d1
 # The warning carries the backup.env secret, so a case can prove that nothing
 # Restic writes to stderr is echoed.
 staged "${FAKE_WARN:-}" "$1" && printf '%s (%s)\n' "$FAKE_WARNING" "${AWS_SECRET_ACCESS_KEY:-}" >&2
@@ -105,7 +108,9 @@ case "$1" in
     # FAKE_LIST_JUNK, a printf format, stands in for the last id, so the number
     # of entries still matches and only their content is wrong.
     [[ -n "${FAKE_LIST_JUNK:-}" ]] && count=$((count - 1))
-    for (( i = 1; i <= count; i++ )); do printf '%064x\n' "$i"; done
+    for (( i = 1; i <= count; i++ )); do
+      if (( i == 1 )) && [[ $phase == post && $FAKE_MODE != upload-forgotten ]]; then echo "$uploaded"; else printf '%064x\n' "$i"; fi
+    done
     # shellcheck disable=SC2059
     [[ -n "${FAKE_LIST_JUNK:-}" ]] && printf "$FAKE_LIST_JUNK"
     : ;;
@@ -114,7 +119,7 @@ case "$1" in
     cat > "$FAKE_STORE"
     [[ "$FAKE_MODE" == no-snapshot-id ]] && { echo '{"message_type":"summary"}'; exit 0; }
     echo '{"message_type":"status","percent_done":1}'
-    echo '{"message_type":"summary","snapshot_id":"5e1f00d1c0ffee5e1f00d1c0ffee5e1f00d1c0ffee5e1f00d1c0ffee5e1f00d1","total_bytes_processed":21}' ;;
+    echo '{"message_type":"summary","snapshot_id":"'"$uploaded"'","total_bytes_processed":21}' ;;
   dump)
     if [[ "$FAKE_MODE" == corrupt ]]; then echo "different bytes"; else cat "$FAKE_STORE"; fi
     [[ "$FAKE_MODE" == dump-exit1 ]] && exit 1
@@ -298,7 +303,7 @@ check "raw data over 2 GiB after the upload fails the deploy" \
   '[[ $code == 1 && $output == *"2147483649 bytes of raw data"* ]] && no_dump_left'
 
 # Real restic 0.16.4 output for a repository that has only been initialised.
-STATS_1='{"total_size":0,"snapshots_count":0}' run ok "$sha"
+STATS_1='{"total_size":0,"snapshots_count":0}' STATS_2='{"total_size":1024,"snapshots_count":1}' run ok "$sha"
 check "an empty initialised repository takes its first backup" \
   '[[ $code == 0 && $output == *"verified backup"* ]] && uploaded'
 
@@ -456,7 +461,7 @@ check "a report that counts fewer snapshots than the repository holds is refused
 HIDDEN="list:post" run ok "$sha"
 check "a report that counts fewer snapshots after the upload fails the deploy" \
   "$refused_after_upload"
-STATS_1='{"total_size":0,"snapshots_count":0}' run ok "$sha"
+STATS_1='{"total_size":0,"snapshots_count":0}' STATS_2='{"total_size":1024,"snapshots_count":1}' run ok "$sha"
 check "a healthy empty repository, with no snapshot file at all, still takes its first backup" \
   '[[ $code == 0 && $output == *"verified backup"* && $output == *"0 snapshot(s)"* ]] && uploaded'
 # The snapshot list is evidence too, and held to the same rules.
@@ -522,6 +527,9 @@ check "statistics that exit non-zero after a valid reply fail the deploy after t
 # compact object Restic 0.16.4 writes, with one LF at most after it.
 raw_untrustworthy=(
   'a CRLF line ending|{"total_size":0,"snapshots_count":3}\r\n'
+  # Command substitution strips every trailing LF, so more than one used to
+  # pass as none (PR #40 review, finding 2).
+  'two trailing LFs|{"total_size":0,"snapshots_count":3}\n\n'
   'a space inside the object|{"total_size": 0,"snapshots_count":3}\n'
   'a pretty-printed object|{\n  "total_size": 0,\n  "snapshots_count": 3\n}\n'
   'an embedded newline|{"total_size":0,\n"snapshots_count":3}\n'
@@ -543,6 +551,9 @@ done
 STATS_1_RAW='{"total_size":0,"snapshots_count":3}\n' run ok "$sha"
 check "the compact reply with its single trailing LF is accepted" \
   '[[ $code == 0 && $output == *"verified backup"* ]] && uploaded'
+STATS_1_RAW='{"total_size":0,"snapshots_count":3}' run ok "$sha"
+check "the compact reply with no trailing LF is accepted" \
+  '[[ $code == 0 && $output == *"verified backup"* ]] && uploaded'
 
 # Inherited values cannot raise the other two limits either.
 ENV_OVERRIDE="max_raw_bytes=999999999999" STATS_1='{"total_size":2147483628,"snapshots_count":3}' run ok "$sha"
@@ -555,6 +566,14 @@ check "the host environment cannot raise the snapshot limit" \
 run no-snapshot-id "$sha"
 check "an upload that reports no snapshot id fails the deploy and reads nothing back" \
   '[[ $code != 0 && $output != *"verified backup"* ]] && uploaded && ! grep -q "^restic dump" "$work/calls" && no_dump_left'
+
+# Retention keeps snapshots by their time, so when earlier snapshots carry later
+# times, say from a host clock that ran ahead and was corrected, postflight
+# retention can forget the snapshot just uploaded while the size and count stay
+# plausible (PR #40 review, finding 1). The deploy must not go on without it.
+run upload-forgotten "$sha"
+check "a verified snapshot that postflight retention forgot fails the deploy" \
+  "$refused_after_upload"' && [[ $output == *"snapshot 5e1f00d1"* ]]'
 # --- end quota cases -------------------------------------------------------
 
 write_env 644

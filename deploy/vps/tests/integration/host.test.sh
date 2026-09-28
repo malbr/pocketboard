@@ -16,6 +16,8 @@
 #     with pocketboard-restore (findings 5 and 6; PR #33 re-review finding 3)
 #   - concurrent SSH requests each get their own run's log (PR #33 re-review
 #     finding 7)
+#   - a backup fails when clock-skewed snapshots make postflight retention
+#     forget the one just uploaded (PR #40 review finding 1)
 #
 # It creates a user, rewrites sshd and polkit configuration, and stops Docker,
 # so it refuses to run unless POCKETBOARD_DISPOSABLE_HOST=yes. Run it through
@@ -264,6 +266,24 @@ replaced="$(psql_in -d postgres -c "SELECT datname FROM pg_database WHERE datnam
 check "the replaced database is kept with the row added after the backup" \
   '[[ "$(psql_in -d "$replaced" -c "SELECT count(*) FROM cards")" == 3 ]]'
 check "no restore dump is left behind" '[[ -z "$(find /var/lib/pocketboard/backup-tmp -type f)" ]]'
+
+# PR #40 review, finding 1: seven earlier snapshots of the same retention group
+# carry later times, as after a host clock that ran ahead was corrected. Real
+# Restic then keeps those seven and forgets the snapshot just uploaded, while
+# the size and count stay inside the limits.
+skew_repo=/srv/restic-disposable-skew
+rm -rf "$skew_repo" && mkdir -p "$skew_repo"
+sed -i "s#^RESTIC_REPOSITORY=.*#RESTIC_REPOSITORY=$skew_repo#" /etc/pocketboard/backup.env
+restic_env init > /dev/null
+for month in $(seq 1 7); do
+  restic_env backup --quiet --host pocketboard --tag pocketboard --tag pre-deploy --tag "sha-$sha" \
+    --time "$(date -u -d "+$month months" '+%F %T')" --stdin --stdin-filename pocketboard.dump < "$seed"
+done
+code=0
+output="$(/usr/local/sbin/pocketboard-backup "$sha" 2>&1)" || code=$?
+left="$(restic_env snapshots --json --host pocketboard | grep -o '"id"' | wc -l)"
+check "a backup that postflight retention forgot under clock skew fails instead of reporting verified" \
+  '[[ $code == 1 && $output == *"removed the verified snapshot"* && $output != *"verified backup"* ]] && (( left == 7 ))'
 
 docker compose -f "$compose_dir/compose.yml" down -v > /dev/null 2>&1
 

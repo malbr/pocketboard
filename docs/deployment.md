@@ -295,10 +295,17 @@ retention is what keeps the repository inside the limits below. So does a
 cannot load with a warning, and a skipped snapshot is neither kept nor removed
 (ADR 0010).
 
+The new snapshot is not guaranteed to survive the second run. Retention keeps
+snapshots by their recorded time, so if seven earlier snapshots carry later
+times, for example after a host clock that ran ahead was corrected, the policy
+is satisfied without the new one and `forget` removes it. The backup therefore
+requires the uploaded snapshot's ID to still be listed after postflight
+retention, and fails before reporting success if it is not (ADR 0011).
+
 ### Quota limits
 
 `pocketboard-backup` refuses to upload unless the repository stays inside three
-limits (ADR 0009, amended by ADR 0010):
+limits (ADR 0009, amended by ADRs 0010 and 0011):
 
 | Limit | Value |
 | --- | --- |
@@ -324,7 +331,8 @@ is the point.
 The evidence comes from `restic stats --mode raw-data --json`, which reports
 `total_size` and `snapshots_count` for the whole repository. The whole reply must
 be one flat JSON object with unique keys and a JSON number in every field,
-exactly as Restic 0.16.4 writes it, and must carry no byte a shell would drop;
+exactly as Restic 0.16.4 writes it, followed by at most one LF, and must carry
+no byte a shell would drop;
 the two numbers are read only after that. Evidence that is missing, repeated in
 any spelling, non-numeric, negative, fractional, zero-padded or too large to
 trust is a failure rather than a zero, and so is any reply outside that shape:
@@ -364,6 +372,10 @@ naming the measured numbers:
 - `restic statistics counted <n> snapshot(s) but the repository holds <m>
   snapshot file(s)` — the report left snapshots out, so the repository has
   snapshot files Restic cannot read. Treat it as possible repository damage.
+- `retention removed the verified snapshot <id>, so this deploy has no
+  pre-deploy backup` — postflight retention kept other snapshots dated later
+  than the new one. Check the host clock and `restic snapshots` for snapshots
+  dated in the future; a rerun fails the same way while they remain.
 - `the quota check could not …` or `the dump could not be measured` — a system
   utility the check relies on failed on the VPS.
 - Restic gave nothing the guard will act on. Check the repository is reachable and
@@ -400,8 +412,10 @@ untouched, and the phase that refused decides what already happened:
   snapshots may already be forgotten, and if any were, `prune` may have uploaded
   repacked data of its own. The new dump was not uploaded.
 - **Postflight retention, evidence or limit** — the new snapshot was uploaded and
-  verified before the check ran, and it stays. A postflight refusal does not undo
-  the upload and does not by itself bring the repository back under the limits,
+  verified before the check ran. A refusal does not undo the upload, but
+  postflight retention itself may have removed it: the `retention removed the
+  verified snapshot` failure means it did, and the deploy has no new backup. A
+  refusal also does not by itself bring the repository back under the limits,
   so the next deploy can fail the same way until the repository is made smaller.
 
 Recovering means making the repository smaller (a human-approved `restic forget`
@@ -510,7 +524,8 @@ notifications remain the backstop.
   systemd, sshd, polkitd, Docker and Restic. It checks effective sshd
   settings, the SSH → gate → polkit → systemd path, polkit denials,
   unauthorized requests, status with Docker stopped, gate output correlation,
-  and Restic retention and restore over real snapshots.
+  and Restic retention and restore over real snapshots, including a backup that
+  fails when clock-skewed snapshots make retention forget the new one.
   `run-disposable-host.sh` runs it in a throwaway privileged Ubuntu 24.04
   container, and CI runs that on every pull request and push to `main` in the
   `host-integration` job, which `publish` depends on. Never run `host.test.sh`
