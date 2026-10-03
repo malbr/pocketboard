@@ -73,8 +73,11 @@ export function createGitHubOAuthProvider(config: AuthConfig): GitHubIdentityPro
     async startAuthorization(request, reply): Promise<void> {
       // Generating the URI here (rather than using startRedirectPath) is what
       // sets the state and PKCE verifier cookies for this browser.
-      const uri = await namespaceOf(request.server).generateAuthorizationUri(request, reply);
-      reply.redirect(uri);
+      const uri = new URL(await namespaceOf(request.server).generateAuthorizationUri(request, reply));
+      // The pinned OAuth library serializes an omitted scope as `scope=undefined`.
+      // GitHub identity-only login must not request a scope at all.
+      uri.searchParams.delete("scope");
+      reply.redirect(uri.toString());
     },
 
     async completeAuthorization(request, reply): Promise<number> {
