@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import Fastify from "fastify";
 import { expect, it } from "vitest";
 import { testAuthConfig } from "../testing/build-test-app";
+import { authRouteRateLimit, registerRateLimit } from "../rate-limit";
 import { createGitHubOAuthProvider } from "./github-oauth";
 
 it("redirects to GitHub without requesting a scope while preserving state and PKCE", async () => {
@@ -10,8 +11,11 @@ it("redirects to GitHub without requesting a scope while preserving state and PK
   const provider = createGitHubOAuthProvider(config);
 
   try {
+    await registerRateLimit(app);
     await provider.register(app);
-    app.get("/auth/github", (request, reply) => provider.startAuthorization(request, reply));
+    app.get("/auth/github", { config: authRouteRateLimit }, (request, reply) =>
+      provider.startAuthorization(request, reply),
+    );
 
     const response = await app.inject({ method: "GET", url: "/auth/github" });
     const location = response.headers.location;

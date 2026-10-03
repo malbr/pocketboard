@@ -57,8 +57,9 @@ export function createGitHubOAuthProvider(config: AuthConfig): GitHubIdentityPro
           client: { id: config.githubClientId, secret: config.githubClientSecret },
           auth: oauth2.GITHUB_CONFIGURATION,
         },
-        // `scope` is intentionally omitted. PocketBoard needs identity only, so
-        // the token it briefly holds grants no repository or account access.
+        // `scope` is intentionally omitted because PocketBoard needs identity
+        // only. GitHub may still reuse scopes from an earlier authorization;
+        // regardless, the token is used only to read the user id and discarded.
         callbackUri: `${config.appBaseUrl}/api/auth/github/callback`,
         pkce: "S256",
         cookie: {
