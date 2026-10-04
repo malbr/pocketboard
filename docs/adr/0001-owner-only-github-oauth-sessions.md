@@ -92,7 +92,7 @@ Everything below `/api` is untrusted input until `requireOwner` has run.
 | Stolen session id | Opaque, signed, `HttpOnly` (unreadable from JS), `Secure` in production, eight-hour cap |
 | Cross-site request forgery | `SameSite=Lax` plus `@fastify/csrf-protection` on logout and card creation; the secret lives in the server-side session |
 | Authorization-code interception | PKCE `S256` (`code_challenge` on authorize, `code_verifier` on exchange) plus `state` |
-| Over-broad GitHub access | No scopes requested, so the short-lived token grants no repository or account access |
+| Over-broad GitHub access | No scopes requested; the callback uses the token only to read the authenticated user id and then discards it. A no-scope token can still read public information, and a previously authorized OAuth App may retain earlier granted scopes, so its effective permissions must be reviewed. |
 | Token leakage | The access token never leaves the callback's scope; `sessionSchema` is `.strict()` so an accidental extra field fails tests |
 | A forged `X-Forwarded-Proto` claiming TLS | Only `TRUSTED_PROXY_IPS` peers are believed; blanket values are refused and production will not start unconfigured |
 | A session quietly outliving its eight-hour cap | `least(existing, proposed)` in the upsert, so no later write can move the deadline forward |

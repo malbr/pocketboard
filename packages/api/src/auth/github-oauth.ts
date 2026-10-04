@@ -57,8 +57,9 @@ export function createGitHubOAuthProvider(config: AuthConfig): GitHubIdentityPro
           client: { id: config.githubClientId, secret: config.githubClientSecret },
           auth: oauth2.GITHUB_CONFIGURATION,
         },
-        // `scope` is intentionally omitted. PocketBoard needs identity only, so
-        // the token it briefly holds grants no repository or account access.
+        // `scope` is intentionally omitted because PocketBoard needs identity
+        // only. GitHub may still reuse scopes from an earlier authorization;
+        // regardless, the token is used only to read the user id and discarded.
         callbackUri: `${config.appBaseUrl}/api/auth/github/callback`,
         pkce: "S256",
         cookie: {
@@ -73,8 +74,11 @@ export function createGitHubOAuthProvider(config: AuthConfig): GitHubIdentityPro
     async startAuthorization(request, reply): Promise<void> {
       // Generating the URI here (rather than using startRedirectPath) is what
       // sets the state and PKCE verifier cookies for this browser.
-      const uri = await namespaceOf(request.server).generateAuthorizationUri(request, reply);
-      reply.redirect(uri);
+      const uri = new URL(await namespaceOf(request.server).generateAuthorizationUri(request, reply));
+      // The pinned OAuth library serializes an omitted scope as `scope=undefined`.
+      // GitHub identity-only login must not request a scope at all.
+      uri.searchParams.delete("scope");
+      reply.redirect(uri.toString());
     },
 
     async completeAuthorization(request, reply): Promise<number> {
