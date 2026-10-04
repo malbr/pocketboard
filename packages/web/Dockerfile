@@ -1,6 +1,5 @@
 # syntax=docker/dockerfile:1
-# Build context: repository root. Base images are pinned by digest so the same
-# commit always builds from the same inputs.
+# Build context: repository root. Base images are pinned by digest.
 
 FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS build
 WORKDIR /app
@@ -21,6 +20,11 @@ LABEL org.opencontainers.image.source="https://github.com/malbr/pocketboard" \
 COPY packages/web/nginx/default.conf /etc/nginx/conf.d/default.conf
 COPY packages/web/nginx/security-headers.conf /etc/nginx/snippets/security-headers.conf
 COPY --from=build /app/packages/web/dist /usr/share/nginx/html
+USER root
+# apk logs wall-clock install times; keep the base log so cold builds agree.
+RUN cp -p /var/log/apk.log /tmp/pocketboard-apk.log \
+    && apk add --no-cache pcre2=10.49-r0 \
+    && mv /tmp/pocketboard-apk.log /var/log/apk.log
 USER 101
 EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
