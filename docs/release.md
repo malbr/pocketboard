@@ -105,10 +105,26 @@ through `tsx`.
 
 Base images are pinned by digest and dependencies come from `package-lock.json`.
 `scripts/release/build-image.sh` sets `SOURCE_DATE_EPOCH` to the commit time
-and rewrites layer timestamps to it. For both the API and web images, two
-cold-cache builds from the same commit produced the same image ID. Build with a
-`docker-container` Buildx builder: Docker Desktop's default builder refuses
-`rewrite-timestamp` when loading into its image store.
+and rewrites layer timestamps to it. Before the temporary web-image exception
+below, two cold-cache builds from the same commit produced the same image ID
+for both images. Build with a `docker-container` Buildx builder: Docker
+Desktop's default builder refuses `rewrite-timestamp` when loading into its
+image store.
+
+The web runtime temporarily installs exactly `pcre2=10.49-r0` from Alpine at
+build time because the digest-pinned nginx base contains vulnerable `10.48-r0`.
+This is an exception to building solely from digest-pinned base contents: a
+web rebuild needs the Alpine repository to serve that exact package. If it no
+longer does, the build fails instead of silently taking a newer version.
+The Dockerfile restores the base image's APK log after the install because
+APK appends a wall-clock timestamp that otherwise changes each cold build's
+image ID. The build output still records the package upgrade.
+The package bytes are not pinned by digest, so the base digest and lockfile
+alone do not guarantee an identical web image on later builds; two cold-cache
+builds check equality only at that point in time. Once an upstream
+`nginx-unprivileged` alpine-slim image includes `pcre2` 10.49-r0 or newer,
+pin its digest and remove the build-time upgrade in a separately approved
+change.
 
 ## Production Compose
 
