@@ -14,7 +14,7 @@ requirements, approvals, code review evidence, or release history live.
 | --- | --- | --- |
 | Local web app | `http://127.0.0.1:5173` | Available while `npm run dev` is running |
 | Local API health | `http://127.0.0.1:3000/health` | Available while the API is running |
-| Production VPS | `https://pocketboard.43-156-84-63.sslip.io` (POC-only, [ADR 0008](adr/0008-sslip-io-poc-hostname.md)) | TLS reverse proxy live; PocketBoard not yet deployed, so `/api/health` answers `502` for now. The deploy path is in [production deployment](deployment.md); the first deploy needs its own approval on #8 |
+| Production VPS | `https://pocketboard.43-156-84-63.sslip.io` (POC-only, [ADR 0008](adr/0008-sslip-io-poc-hostname.md)) | Running `cfd587a`; public `/api/health` returns `200 {"status":"ok"}`. See the [deploy evidence](https://github.com/malbr/pocketboard/issues/8#issuecomment-5982138363) and [production deployment](deployment.md) |
 | Release images | `ghcr.io/malbr/pocketboard-{api,web}:<commit SHA>` | Published by CI for each commit on `main`; never deployed automatically. See [release artifacts](release.md) |
 
 `main` contains owner-only GitHub authentication (PR #11, merged 2026-09-17), so
@@ -22,9 +22,34 @@ every card route on `main` already requires the owner's GitHub session, moving
 cards between columns (#4, PR #13, merged 2026-09-17), and deleting a card
 (#5, PR #14, merged 2026-09-17).
 
-The focused-lane board UI (#6) is **not** on `main`. It is pending review and
-the human owner's merge approval. Nothing is active on a VPS until the owner
-also approves a production release.
+The focused-lane board UI ([#6](https://github.com/malbr/pocketboard/issues/6))
+is merged on `main` and is part of the deployed release. Production first ran
+`0024722`, then `cfd587a`; both releases have `ok` ledger entries and remain
+valid rollback targets after the [successful drill](https://github.com/malbr/pocketboard/issues/8#issuecomment-5993358941).
+
+## Production monitoring and access
+
+The existing Uptime Kuma is bound to `127.0.0.1:3001`; the owner reaches
+its dashboard through an SSH tunnel. Its HTTP(s) monitor checks
+`https://pocketboard.43-156-84-63.sslip.io/api/health` every 60 seconds and
+has a WhatsApp (Whapi) notification whose
+test reached the owner. The monitor uses HTTP status, not a response keyword;
+an incident alert remains to be proved by the supervised exercise on #9.
+See the [owner's monitoring evidence](https://github.com/malbr/pocketboard/issues/9#issuecomment-6008595492).
+
+As of 2026-10-06, no agent SSH key is authorized on the host. The sole owner
+`ubuntu` key is passphrase-protected and never loaded into an ssh-agent; the
+owner's PC ssh-agent service is Manual and stopped. The restricted deployment
+key is held only in the GitHub `production` Environment. The owner runs every
+manual VPS command, including diagnostics, and can use the Tencent Lighthouse
+web console for access recovery. See the [access remediation](https://github.com/malbr/pocketboard/issues/8#issuecomment-5999090066)
+and [owner key replacement](https://github.com/malbr/pocketboard/issues/9#issuecomment-6008109795).
+
+Known residual risks: [ADR 0008](adr/0008-sslip-io-poc-hostname.md) ties the
+sslip.io hostname to the VPS IP; `ubuntu` retains passwordless sudo behind the
+owner's passphrase; the provider `lighthouse` account retains sudo; and a copied
+deployment key could consume an unused host authorization line before the
+Environment approval ([ADR 0007](adr/0007-host-authorization-and-database-boundary.md)).
 
 ## Run PocketBoard locally
 
@@ -96,14 +121,14 @@ registered at GitHub.
 1. In GitHub, select one issue labelled `ready-for-agent`.
 2. In Orca, create a worktree linked to that issue from `main`. Name it after
    the issue, for example `issue-4-move-cards`.
-3. Start one writer terminal in that worktree. Kiro is the preferred
-   implementation writer; Claude Code is the controlled fallback while Kiro is
-   unavailable. Never start both as writers for the same issue.
+3. Start one writer terminal in that worktree using the platform and model
+   recorded in the issue lease. Follow [model routing](agents/model-routing.md);
+   Kiro is paused. Never start two writers for the same issue.
 4. Give the writer only the issue URL and this instruction: read `AGENTS.md`,
    the issue, `CONTEXT.md`, and relevant ADRs; load files selectively; implement
    and test the vertical slice; create a PR; then post a compact handoff.
-5. After the writer stops, start Codex as a read-only reviewer. It may report
-   findings but must not edit the writer's worktree.
+5. After the writer stops, start the lease's read-only reviewer. They may
+   report findings but must not edit the writer's worktree.
 6. If work reaches a human gate, create an Orca decision gate and post the same
    request on the linked GitHub issue or PR. Work remains blocked until the
    GitHub approval is verified.
@@ -120,10 +145,10 @@ Start a writer terminal after the worktree exists:
 
 ```powershell
 orca terminal create --worktree issue:4 --title "issue-4-writer" `
-  --command "kiro-cli" --focus --json
+  --command "claude" --focus --json
 ```
 
-Use `--command "claude"` only for the approved fallback. Do not add
+Use the command for the writer named in the issue lease. Do not add
 `--trust-all-tools`; permission bypass is prohibited.
 
 ## GitHub approval workflow
@@ -192,8 +217,8 @@ history as durable documentation.
   `main` and waits for your approval on the `production` Environment. Approve
   it only for the SHA named in an approved issue gate. Its log shows the
   backup, migration, health, and running SHA.
-- **Production health:** after deployment, monitor the public `/health` URL in
-  the existing Uptime Kuma and verify encrypted off-VPS backups separately.
+- **Production health:** monitor the public `/api/health` URL in the existing
+  Uptime Kuma and verify encrypted off-VPS backups separately.
 
 ## Human-only decisions
 
@@ -203,7 +228,7 @@ changes, rollback, spending, and production-data access.
 
 ## Context and token discipline
 
-Start a fresh Codex/Claude/Kiro task for each GitHub issue and end it after the
+Start a fresh agent task for each GitHub issue and end it after the
 handoff is recorded. Each task loads only `AGENTS.md`, its issue,
 `CONTEXT.md`, relevant ADRs, and targeted files. Do not continue one permanent
 project chat, paste entire command logs, or ask every agent to rediscover the
