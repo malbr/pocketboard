@@ -85,11 +85,13 @@ function send(app: FastifyInstance, headers: Record<string, string>, remoteAddre
 }
 
 describe("the modelled chain matches the deployment files", () => {
+  const composeLines = compose.split(/\r?\n/).map((line) => line.trim());
+
   it("fixes nginx's address and the frontend subnet in Compose", () => {
-    expect(compose).toMatch(new RegExp(`subnet:\\s*${FRONTEND_SUBNET.replace(/\./g, "\\.")}\\s*$`, "m"));
-    expect(compose).toMatch(new RegExp(`ipv4_address:\\s*${NGINX_ADDRESS.replace(/\./g, "\\.")}\\s*$`, "m"));
+    expect(composeLines).toContain(`- subnet: ${FRONTEND_SUBNET}`);
+    expect(composeLines).toContain(`ipv4_address: ${NGINX_ADDRESS}`);
     // A configured gateway would replace the default this file relies on.
-    expect(compose).not.toMatch(/^\s*gateway:/m);
+    expect(composeLines.some((line) => line.startsWith("gateway:"))).toBe(false);
   });
 
   it("has nginx append its peer to X-Forwarded-For, as modelled", () => {
