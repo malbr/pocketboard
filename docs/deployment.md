@@ -135,6 +135,27 @@ certificate automatically ([ADR 0008](adr/0008-sslip-io-poc-hostname.md)).
 The deployed public `/api/health` returns `200 {"status":"ok"}` after a
 PostgreSQL round trip ([release evidence](https://github.com/malbr/pocketboard/issues/8#issuecomment-5982138363)).
 
+**Client identity through the proxies.** Rate limits count per client, so the
+API must see the visitor's address, not a proxy's:
+
+```text
+client ─TLS─▶ Caddy (host) ─▶ 127.0.0.1:8080 ─▶ nginx 172.31.250.10 ─▶ api
+              sets X-Forwarded-For      peer is 172.31.250.1,
+              to the client             which nginx appends
+```
+
+Caddy discards any `X-Forwarded-For` a client sends and writes the client's
+address. That is its documented default, which holds unless the host's Caddy
+config sets `trusted_proxies`; this repository does not hold that config, and
+the design does not depend on it, because a forged value Caddy kept would sit
+to the left of the address Caddy appends. The API trusts `172.31.250.10` and
+`172.31.250.1` and takes
+the rightmost address that is neither. The gateway is trusted because every
+connection from the host into the `frontend` bridge, Caddy's included, leaves
+from it. That also means any process on the host that calls `127.0.0.1:8080`
+directly can name its own client address; only the host is trusted that far
+([ADR 0012](adr/0012-client-identity-behind-caddy-and-nginx.md)).
+
 Install from the approved merge commit, never from a branch:
 
 ```sh

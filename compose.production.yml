@@ -63,8 +63,14 @@ services:
     environment:
       NODE_ENV: production
       API_PORT: "3000"
-      # Only the web proxy may set X-Forwarded-*; its address is fixed below.
-      TRUSTED_PROXY_IPS: 172.31.250.10
+      # The hops in front of the API, each believed only for the address it
+      # appends to X-Forwarded-For (issue #51):
+      #   172.31.250.10  web nginx, fixed by `ipv4_address` below
+      #   172.31.250.1   the frontend bridge gateway: Docker's default for the
+      #                  subnet below, and the source of everything the host
+      #                  sends to the published port, i.e. the host's Caddy
+      # The real client is the rightmost address that is neither.
+      TRUSTED_PROXY_IPS: 172.31.250.10,172.31.250.1
       GITHUB_OAUTH_CLIENT_ID_FILE: /run/secrets/github-client-id
       GITHUB_OAUTH_CLIENT_SECRET_FILE: /run/secrets/github-client-secret
       SESSION_SECRET_FILE: /run/secrets/session-secret
@@ -155,6 +161,7 @@ networks:
   frontend:
     ipam:
       config:
+        # No `gateway`: the default, 172.31.250.1, is trusted by the API above.
         - subnet: 172.31.250.0/24
 
 volumes:

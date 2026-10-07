@@ -138,7 +138,11 @@ itself; the approved deploy script supplies `RELEASE_SHA`, `API_DIGEST`,
   which the GitHub OAuth code exchange needs.
 - `web` publishes `127.0.0.1:${WEB_PORT:-8080}` only. A TLS-terminating reverse
   proxy on the host is the public entry point and must set `X-Forwarded-Proto`.
-  The API trusts forwarded headers only from the web container's fixed address.
+  The API trusts forwarded headers only from the web container's fixed address
+  `172.31.250.10` and from the `frontend` bridge gateway `172.31.250.1`, which
+  is where the host proxy's connections to the published port arrive (ADR 0012).
+  `frontend` deliberately sets no `gateway`, so Docker's default stays that
+  address.
 - Every long-running service has a health check, CPU, memory, and PID limits,
   and `no-new-privileges`. `api` and `web` are read-only with all capabilities
   dropped.
