@@ -9,6 +9,13 @@ Every step here is performed by the human owner or runs only after the
 owner's approval on GitHub. Agents hold no VPS credential and never see a
 secret value.
 
+Production currently runs `cfd587ad04f562b2c455cece99f8c23d1c457140`:
+the [first release](https://github.com/malbr/pocketboard/issues/8#issuecomment-5966940321)
+and [second release](https://github.com/malbr/pocketboard/issues/8#issuecomment-5982138363)
+both have `ok` ledger entries. The [rollback drill](https://github.com/malbr/pocketboard/issues/8#issuecomment-5993358941)
+switched to the first release and back without changing PostgreSQL. Both
+releases remain valid application-image rollback targets.
+
 ## How a deploy works
 
 ```text
@@ -122,14 +129,11 @@ running `polkitd`, and `restic`, `curl` and `flock` installed. You also need a
 TLS reverse proxy for the production hostname that forwards to
 `127.0.0.1:8080` and sets `X-Forwarded-Proto`.
 
-**Reviewed host state for the current VPS** (ADR 0008,
-https://github.com/malbr/pocketboard/issues/8#issuecomment-5826103589): the
-Ubuntu `caddy` package (with `libnss3-tools`, no other package changed)
-already reverse-proxies the exact hostname `pocketboard.43-156-84-63.sslip.io`
-to `127.0.0.1:8080`, obtains and renews its public TLS certificate
-automatically, and returns `502` until PocketBoard is deployed, because
-nothing yet listens on 8080. That `502` is expected and is not an application
-health signal.
+**Current host state:** Caddy reverse-proxies
+`pocketboard.43-156-84-63.sslip.io` to `127.0.0.1:8080` and renews its TLS
+certificate automatically ([ADR 0008](adr/0008-sslip-io-poc-hostname.md)).
+The deployed public `/api/health` returns `200 {"status":"ok"}` after a
+PostgreSQL round trip ([release evidence](https://github.com/malbr/pocketboard/issues/8#issuecomment-5982138363)).
 
 Install from the approved merge commit, never from a branch:
 
@@ -181,6 +185,15 @@ restrict,command="/usr/local/lib/pocketboard/ssh-gate" ssh-ed25519 AAAA... pocke
 Paste the private half into the Environment secret below, then delete the
 local private key file.
 
+On the current host, only the owner's passphrase-protected `ubuntu` key is
+authorized for admin SSH. It is never loaded into an ssh-agent; the owner's PC
+ssh-agent service is Manual and stopped. No agent key is authorized. The
+restricted deploy private key exists only in the `production` Environment,
+and the Tencent Lighthouse web console is the owner's recovery path. Only the
+owner runs manual VPS commands, including access checks and diagnostics. See
+the [2026-10-05 access remediation](https://github.com/malbr/pocketboard/issues/8#issuecomment-5999090066)
+and [2026-10-06 key replacement](https://github.com/malbr/pocketboard/issues/9#issuecomment-6008109795).
+
 **Secrets and backup.** Create the files in `/etc/pocketboard/secrets/` and
 `/etc/pocketboard/backup.env` by hand on the VPS, as approved in
 `issue8-secrets-placement` and `issue8-backup-r2`. Keep an off-VPS copy of
@@ -220,10 +233,13 @@ into this repository, an issue, or agent chat.
   - `PRODUCTION_SSH_PORT`
   - `PRODUCTION_SSH_KNOWN_HOSTS`: the host's public key line from `ssh-keyscan`, checked against the fingerprint on the VPS. With a port other than 22, the line starts `[host]:port`.
 
-## Access review before the first deploy
+## Access review
 
 Run these from your own machine and as root on the VPS. Every check must give
 the stated result.
+
+The owner last ran this review on 2026-10-05; results and the one polkit check
+proved by CI are in the [access-review record](https://github.com/malbr/pocketboard/issues/8#issuecomment-5994186447).
 
 | Check | Expected |
 | --- | --- |
