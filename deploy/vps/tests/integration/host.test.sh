@@ -115,6 +115,9 @@ kill "$tunnel" 2> /dev/null || true
 wait "$tunnel" 2> /dev/null || true
 code="" output="$banner"
 check "port forwarding is refused" '[[ "$banner" != SSH-2.0 ]] && journalctl --no-pager | grep -q "refused local port forward"'
+printf 'forwarding diagnostic: banner=%q\n' "$banner"
+sshd -V 2>&1
+journalctl --no-pager -o cat | grep -i 'forward' | tail -n 10 || true
 
 as_deploy() { code=0; output="$(runuser -u pocketboard-deploy -- "$@" 2>&1)" || code=$?; }
 as_deploy systemctl --no-ask-password restart docker.service
