@@ -61,8 +61,15 @@ never limited. A client over budget receives `429` with
 when the API restarts.
 
 The client is identified by the address Fastify resolves, so the limits rely on
-`TRUSTED_PROXY_IPS`. If it does not name the proxy in front of the API, every
-visitor appears as the proxy and shares one budget.
+`TRUSTED_PROXY_IPS`. If it does not name every proxy in front of the API, every
+visitor appears as the innermost unnamed proxy and shares one budget.
+
+Production has two proxies: the host's Caddy terminates TLS and forwards to
+the loopback-published port, and the web container's nginx forwards to the
+API. `compose.production.yml` trusts exactly nginx (`172.31.250.10`) and the
+`frontend` bridge gateway (`172.31.250.1`) that Caddy's connections arrive
+from, so the client is the address Caddy wrote into `X-Forwarded-For`. See
+`docs/adr/0012-client-identity-behind-caddy-and-nginx.md`.
 
 Start everything with one command:
 

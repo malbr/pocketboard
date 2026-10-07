@@ -4,10 +4,19 @@ import type { FastifyInstance } from "fastify";
 /**
  * Per-client request budgets (OWASP API4, unrestricted resource consumption).
  *
- * The client is `request.ip`, which Fastify derives from X-Forwarded-For only
- * when the socket peer is a configured trusted proxy. Behind the production
- * web proxy each real client gets its own budget, while a direct caller cannot
- * pick a fresh identity by rotating that header.
+ * The client is `request.ip`. Fastify walks X-Forwarded-For from the right,
+ * starting at the socket peer, and stops at the first address that is not in
+ * `TRUSTED_PROXY_IPS`. Production has two hops in front of the API:
+ *
+ *   client → host Caddy → 127.0.0.1:8080 → web nginx (172.31.250.10) → api
+ *
+ * Caddy replaces any client-sent X-Forwarded-For with the client's address
+ * (its default), and reaches nginx from the `frontend` bridge gateway
+ * (172.31.250.1), which nginx appends. Both of those addresses are trusted, so
+ * the walk passes them and lands on the address Caddy wrote. A value a client
+ * forges stays to the left of that and is never reached, and a direct caller
+ * from any other address is its own identity whatever it sends.
+ * `proxy-chain.test.ts` models the chain from the deployment files.
  *
  * Counters live in process memory: there is one API container, and a restart
  * resetting them is acceptable for a POC.
