@@ -114,10 +114,13 @@ banner="$(timeout 5 bash -c 'exec 3<> /dev/tcp/127.0.0.1/15432 && head -c 7 <&3'
 kill "$tunnel" 2> /dev/null || true
 wait "$tunnel" 2> /dev/null || true
 code="" output="$banner"
-check "port forwarding is refused" '[[ "$banner" != SSH-2.0 ]] && journalctl --no-pager | grep -q "refused local port forward"'
-printf 'forwarding diagnostic: banner=%q\n' "$banner"
-sshd -V 2>&1
-journalctl --no-pager -o cat | grep -i 'forward' | tail -n 10 || true
+refusal_log=""
+for _ in {1..15}; do
+  refusal_log="$(journalctl --no-pager -o cat | grep 'refused local port forward' || true)"
+  [[ -n "$refusal_log" ]] && break
+  sleep 1
+done
+check "port forwarding is refused" '[[ "$banner" != SSH-2.0 && -n "$refusal_log" ]]'
 
 as_deploy() { code=0; output="$(runuser -u pocketboard-deploy -- "$@" 2>&1)" || code=$?; }
 as_deploy systemctl --no-ask-password restart docker.service
