@@ -29,6 +29,11 @@ valid rollback targets after the [successful drill](https://github.com/malbr/poc
 
 ## Production monitoring and access
 
+API request logs retain the route, status, and non-sensitive query parameters;
+values of sensitive parameters such as OAuth `code` and `state` are redacted.
+The web nginx access log for `/api/` records the path and status without any
+query string. Logs written by older releases are not changed by this setting.
+
 The existing Uptime Kuma is bound to `127.0.0.1:3001`; the owner reaches
 its dashboard through an SSH tunnel. Its HTTP(s) monitor checks
 `https://pocketboard.43-156-84-63.sslip.io/api/health` every 60 seconds and

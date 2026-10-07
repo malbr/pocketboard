@@ -2,7 +2,7 @@ import { buildApp } from "./app";
 import { createGitHubOAuthProvider } from "./auth/github-oauth";
 import { loadAuthConfig } from "./config/auth-config";
 import { createDbClient } from "./db/client";
-import { serializeErrorForLog } from "./errors";
+import { apiLoggerOptions } from "./logger";
 import { createPostgresHealthCheck } from "./health/postgres-health-check";
 import type { FastifyInstance } from "fastify";
 
@@ -36,10 +36,7 @@ export async function createProductionApp(
     identityProvider: createGitHubOAuthProvider(authConfig),
     // Without this the API is silent about its own failures, and the generic
     // `internal_error` body would be the only trace a 500 ever left.
-    logger: {
-      level: env.LOG_LEVEL ?? "info",
-      serializers: { err: serializeErrorForLog },
-    },
+    logger: apiLoggerOptions(env.LOG_LEVEL ?? "info"),
     sessionCleanup: { intervalMs: SESSION_CLEANUP_INTERVAL_MS },
   });
 
