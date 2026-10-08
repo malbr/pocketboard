@@ -257,22 +257,35 @@ into this repository, an issue, or agent chat.
 ## Access review
 
 Run these from your own machine and as root on the VPS. Every check must give
-the stated result.
+the stated result. The `status` and refused-deploy results depend on whether
+the host has had a release yet, so use the column that matches it.
 
-The owner last ran this review on 2026-10-05; results and the one polkit check
-proved by CI are in the [access-review record](https://github.com/malbr/pocketboard/issues/8#issuecomment-5994186447).
+The owner last ran this review on 2026-10-05, on a deployed host; the results
+are in the [access-review record](https://github.com/malbr/pocketboard/issues/8#issuecomment-5994186447).
 
-| Check | Expected |
-| --- | --- |
-| `ssh -i pocketboard-deploy pocketboard-deploy@<host>` | `refused: allowed requests are ...`, then the connection closes, with no prompt |
-| `ssh ... pocketboard-deploy@<host> id` | `refused`, exit 2 |
-| `ssh ... pocketboard-deploy@<host> status` | `invocation <id>`, then `no release recorded` |
-| `ssh ... pocketboard-deploy@<host> "deploy <sha> sha256:<a> sha256:<b>"` with no authorization line | `refused: ... is not authorized`, and no `/var/lib/pocketboard/releases` |
-| `ssh -N -L 5432:127.0.0.1:5432 ...` | forwarding refused |
-| `sudo -l -U pocketboard-deploy` (root) | not allowed to run sudo |
-| `sudo -u pocketboard-deploy docker ps` (root) | permission denied on the Docker socket |
-| `sudo -u pocketboard-deploy systemctl --no-ask-password restart docker` (root) | access denied by polkit |
-| `stat -c '%U %a' /etc/pocketboard/backup.env` | `root 600` |
+| Check | Before the first deploy | On a deployed host |
+| --- | --- | --- |
+| `ssh -i pocketboard-deploy pocketboard-deploy@<host>` | `refused: allowed requests are ...`, then the connection closes, with no prompt | same |
+| `ssh ... pocketboard-deploy@<host> id` | `refused`, exit 2 | same |
+| `ssh ... pocketboard-deploy@<host> status` | `invocation <id>`, then `no release recorded` | `invocation <id>`, then `current: <sha> <api> <web>` for the running release and its recent ledger lines |
+| `ssh ... pocketboard-deploy@<host> "deploy <sha> sha256:<a> sha256:<b>"` with no authorization line | `refused: ... is not authorized`, and no `/var/lib/pocketboard/releases`, `releases.log` or `deploy.lock` | `refused: ... is not authorized`, and no **new** release directory, ledger line or lock: `ls /var/lib/pocketboard/releases`, `wc -l /var/lib/pocketboard/releases.log` and `stat -c %y /var/lib/pocketboard/deploy.lock` read the same before and after |
+| `ssh -N -L 5432:127.0.0.1:5432 ...` | forwarding refused | same |
+| `sudo -l -U pocketboard-deploy` (root) | not allowed to run sudo | same |
+| `sudo -u pocketboard-deploy docker ps` (root) | permission denied on the Docker socket | same |
+| polkit refuses `pocketboard-deploy` a Docker restart | see below | see below |
+| `stat -c '%U %a' /etc/pocketboard/backup.env` | `root 600` | same |
+
+**polkit and Docker restarts.** Never run a live negative restart
+(`sudo -u pocketboard-deploy systemctl restart docker`) on a host with other
+services: if the policy were wrong, it would restart Docker and every
+container on the host. Prove the refusal by equivalence instead:
+
+1. As root on the VPS, `sha256sum /etc/polkit-1/rules.d/50-pocketboard-deploy.rules`.
+2. In a checkout of `main`, `sha256sum deploy/vps/config/50-pocketboard-deploy.rules`.
+   The two hashes must be identical.
+3. Confirm the latest CI run on `main` passed `host-integration`. Its check
+   "polkit refuses the deploy account a Docker restart" runs that exact file on
+   a throwaway CI container.
 
 ## Deploy, roll back, status
 
